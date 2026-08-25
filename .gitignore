@@ -1,0 +1,33 @@
+
+# Bob AI assistant files (local only)
+.bob/
+AGENTS.md
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Log files (runtime outputs)
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Credentials and sensitive data
+*.key
+*.pem
+credentials.json
+my_config.sh
+
+# JDBC driver
+*.jar
+
+# Test reports
+toolkit-tester/reports/

@@ -1,0 +1,13 @@
+# Test Suite Requirements
+# Python 3.8+ required
+
+# Core dependencies (inherited from main projects)
+pandas>=2.0.0
+ibm-cos-sdk>=2.13.0
+
+# JDBC support (optional - only needed for loader JDBC tests)
+JayDeBeApi>=1.2.3
+
+# Note: For JDBC tests, you also need:
+# 1. Java Runtime Environment (JRE) installed
+# 2. IBM DB2 JDBC driver (db2jcc4.jar) in your classpath

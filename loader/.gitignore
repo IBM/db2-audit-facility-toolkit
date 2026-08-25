@@ -1,0 +1,47 @@
+# Configuration files with credentials
+my_config.sh
+*_config.sh
+!example_config.sh
+
+# Log files
+*.log
+
+# Downloaded DEL files
+del_files/
+*.del
+
+# LOB files
+auditlobs/
+*.lob
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Validation exports
+validation_*.csv
+*_report.csv
+
+# JDBC driver (should be downloaded separately)
+*.jar
+
+# Made with Bob

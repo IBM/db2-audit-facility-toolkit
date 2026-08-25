@@ -2,16 +2,21 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
-
 | Version | Supported          |
 | ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| 1.1.x   | :white_check_mark: |
+| 1.0.x   | :white_check_mark: |
 
 ## Reporting a Vulnerability
 
-To report a security issue, please email $VMTalias with a description of the issue, the steps you took to create the issue, affected versions, and if known, mitigations for the issue. Our vulnerability management team will acknowledge receiving your email within 3 working days. This project follows a 90 day disclosure timeline.
+To report a security vulnerability, please do **not** open a public GitHub issue.
+
+Instead, use the [GitHub private vulnerability reporting](https://github.com/IBM/db2-audit-facility-toolkit/security/advisories/new) feature to submit a report confidentially.
+
+Please include:
+- A description of the vulnerability
+- Steps to reproduce the issue
+- Affected versions
+- Any known mitigations
+
+Our maintainers will acknowledge the report within 3 business days and aim to provide a fix or mitigation within 90 days of disclosure. We follow a coordinated disclosure model.

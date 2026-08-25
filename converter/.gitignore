@@ -1,0 +1,52 @@
+# DB2 Audit Converter - Git Ignore
+
+# Output directories
+del_files/
+csv_output/
+test_csv_output/
+*_output/
+
+# Log files
+*.log
+*.txt
+!requirements.txt
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Credentials and sensitive data
+*.key
+*.pem
+credentials.json
+config.json
+
+# Test files
+test_*.csv
+test_*.ddl
+headers.csv
+
+# DDL files (user should provide their own)
+# Uncomment if you want to ignore DDL files
+# *.ddl
+
+# Made with Bob

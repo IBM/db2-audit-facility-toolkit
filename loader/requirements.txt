@@ -1,0 +1,10 @@
+# IBM Cloud Object Storage SDK
+ibm-cos-sdk>=2.13.0
+
+# JDBC support (optional - only needed for JDBC connections)
+JayDeBeApi>=1.2.3
+
+# Note: For JDBC connections, you also need:
+# 1. Java Runtime Environment (JRE) installed
+# 2. IBM DB2 JDBC driver (db2jcc4.jar) in your classpath
+#    Download from: https://www.ibm.com/support/pages/db2-jdbc-driver-versions-and-downloads

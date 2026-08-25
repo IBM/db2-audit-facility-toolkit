@@ -1,0 +1,9 @@
+# DB2 Audit Converter - Requirements
+# Python 3.13+ required
+
+# Core dependencies for downloading and converting audit logs
+ibm-cos-sdk>=2.13.0
+
+# IBM Cloud Object Storage dependencies (included with ibm-cos-sdk)
+# ibm-boto3>=1.18.0
+# ibm-botocore>=1.21.0
