@@ -25,10 +25,11 @@ import sys
 import os
 from datetime import datetime
 
-# Add parent directory to path to import Db2AuditS3Downloader
+# Add parent directory to path to import Db2AuditS3Downloader and Db2AuditAliasDownloader
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'converter'))
 
 from Db2AuditS3Downloader import Db2AuditS3Downloader
+from Db2AuditAliasDownloader import Db2AuditAliasDownloader
 from Db2AuditLoader import Db2AuditLoader
 from Db2TableManager import Db2TableManager
 
@@ -39,22 +40,28 @@ def parse_args():
         description="Download and load DB2 audit files from S3 into DB2 tables",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Local DB2 connection
-  python load_audit_files.py --connection local \\
-    --bucket my-audit-bucket \\
-    --start-time "2024-01-01 00:00:00" \\
-    --end-time "2024-01-31 23:59:59"
-  
-  # JDBC connection
-  python load_audit_files.py --connection jdbc \\
-    --jdbc-url "jdbc:db2://your-db2-host.example.com:50000/BLUDB" \\
-    --jdbc-user testuser \\
-    --jdbc-password testpass \\
-    --bucket my-audit-bucket \\
-    --start-time "2024-01-01 00:00:00" \\
-    --end-time "2024-01-31 23:59:59"
-        """
+    Examples:
+      # Local DB2 connection
+      python load_audit_files.py --connection local \\
+        --bucket my-audit-bucket \\
+        --start-time "2024-01-01 00:00:00" \\
+        --end-time "2024-01-31 23:59:59"
+      
+      # Local DB2 connection using COS Alias
+      python load_audit_files.py --connection local \\
+        --cos-alias MY_COS_ALIAS \\
+        --start-time "2024-01-01 00:00:00" \\
+        --end-time "2024-01-31 23:59:59"
+      
+      # JDBC connection
+      python load_audit_files.py --connection jdbc \\
+        --jdbc-url "jdbc:db2://your-db2-host.example.com:50000/BLUDB" \\
+        --jdbc-user testuser \\
+        --jdbc-password testpass \\
+        --bucket my-audit-bucket \\
+        --start-time "2024-01-01 00:00:00" \\
+        --end-time "2024-01-31 23:59:59"
+            """
     )
     
     # Connection options
@@ -74,7 +81,9 @@ Examples:
     parser.add_argument('--jdbc-driver', default='com.ibm.db2.jcc.DB2Driver', help='JDBC driver class')
     
     # S3/COS options
-    parser.add_argument('--bucket', required=True, help='S3/COS bucket name')
+    parser.add_argument('--bucket', help='S3/COS bucket name')
+    parser.add_argument('--cos-alias', help='db2RemStgManager COS alias (alternative to --bucket and credentials)')
+    parser.add_argument('--db2-user', default='db2inst1', help='OS user for db2audit / db2RemStgManager commands (default: db2inst1)')
     parser.add_argument('--s3-prefix', default='', help='S3 prefix/folder path')
     parser.add_argument('--cos-endpoint', help='IBM COS endpoint URL')
     parser.add_argument('--cos-access-key', help='IBM COS access key ID')
@@ -130,6 +139,19 @@ def validate_args(args):
         if not all([args.jdbc_url, args.jdbc_user, args.jdbc_password]):
             print("❌ Error: --jdbc-url, --jdbc-user, and --jdbc-password are required for JDBC connection")
             sys.exit(1)
+    
+    # Validate download parameters if not skipped and not in validate-only mode
+    if not args.skip_download and not args.validate_only:
+        if not args.bucket and not args.cos_alias:
+            print("❌ Error: Either --bucket or --cos-alias must be specified for download")
+            sys.exit(1)
+        if args.bucket and args.cos_alias:
+            print("❌ Error: Cannot specify both --bucket and --cos-alias. Choose one.")
+            sys.exit(1)
+        if args.bucket:
+            if not all([args.cos_endpoint, args.cos_access_key, args.cos_secret_key]):
+                print("❌ Error: --cos-endpoint, --cos-access-key, and --cos-secret-key are required when using --bucket")
+                sys.exit(1)
     
     # Validate time format
     try:
@@ -204,16 +226,25 @@ def main():
             print("-"*70)
             
             try:
-                downloader = Db2AuditS3Downloader(
-                    bucket_name=args.bucket,
-                    s3_prefix=args.s3_prefix,
-                    local_dir=args.local_dir,
-                    log_file="s3_download.log",
-                    cos_access_key_id=args.cos_access_key,
-                    cos_endpoint=args.cos_endpoint,
-                    cos_secret_access_key=args.cos_secret_key,
-                    region=args.cos_region
-                )
+                if args.cos_alias:
+                    downloader = Db2AuditAliasDownloader(
+                        cos_alias=args.cos_alias,
+                        s3_prefix=args.s3_prefix,
+                        local_dir=args.local_dir,
+                        log_file="s3_download.log",
+                        db2_user=args.db2_user
+                    )
+                else:
+                    downloader = Db2AuditS3Downloader(
+                        bucket_name=args.bucket,
+                        s3_prefix=args.s3_prefix,
+                        local_dir=args.local_dir,
+                        log_file="s3_download.log",
+                        cos_access_key_id=args.cos_access_key,
+                        cos_endpoint=args.cos_endpoint,
+                        cos_secret_access_key=args.cos_secret_key,
+                        region=args.cos_region
+                    )
                 
                 result = downloader.download_files_in_range(
                     start_time=args.start_time,
@@ -223,7 +254,8 @@ def main():
                 downloaded_files = result.get('downloaded', [])
                 
                 if not downloaded_files:
-                    print("⚠️  No files downloaded. Check time range and S3 bucket.")
+                    target_source = f"alias {args.cos_alias}" if args.cos_alias else f"bucket {args.bucket}"
+                    print(f"⚠️  No files downloaded. Check time range and S3 {target_source}.")
                     loader.disconnect()
                     return
                 

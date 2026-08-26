@@ -89,6 +89,18 @@ python loader/load_audit_files.py \
   --end-time "2025-01-15 23:59:59"
 ```
 
+#### Alternative: Using a configured Db2 COS Alias
+
+If your Db2 server has a Cloud Object Storage (COS) alias configured via `db2RemStgManager`, you can use it instead of passing bucket, endpoint, and credential details directly. The loader will utilize `db2RemStgManager` to download the audit DEL files.
+
+```bash
+python loader/load_audit_files.py \
+  --connection local \
+  --cos-alias MY_COS_ALIAS \
+  --start-time "2025-01-15 00:00:00" \
+  --end-time "2025-01-15 23:59:59"
+```
+
 #### JDBC connection example
 
 ```bash
@@ -378,8 +390,7 @@ Example:
 python converter/db2audit_converter.py --extract --convert \
   --cos-alias MY_COS_ALIAS \
   --binary-files db2audit.db.BLUDB.log.0.20250112103400000000 \
-  --ddl-file converter/db2audit.ddl \
-  --output-dir ./csv_output
+  --ddl-file converter/db2audit.ddl
 ```
 
 ---
