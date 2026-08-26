@@ -56,8 +56,8 @@ class Db2AuditBinaryExtractor:
             Defaults to ``db2inst1``.
         """
         self.cos_alias = cos_alias
-        self.download_dir = download_dir
-        self.extract_dir = extract_dir or os.path.join(download_dir, "del_extracted")
+        self.download_dir = os.path.abspath(download_dir)
+        self.extract_dir = os.path.abspath(extract_dir) if extract_dir else os.path.join(self.download_dir, "del_extracted")
         self.log_file = log_file
         self.db2_user = db2_user
 
