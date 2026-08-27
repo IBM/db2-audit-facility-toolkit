@@ -58,6 +58,10 @@ class Db2AuditAliasDownloader:
         self.log(f"🚀 Initialized Db2AuditAliasDownloader for COS alias: {self.cos_alias}")
 
         os.makedirs(self.local_dir, exist_ok=True)
+        try:
+            os.chmod(self.local_dir, 0o775)
+        except OSError as e:
+            self.log(f"⚠️  Could not set directory permissions: {e}")
 
     def log(self, message):
         """Log message to console and file."""
