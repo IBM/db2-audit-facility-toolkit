@@ -13,7 +13,7 @@ This script:
 4. Validates that records exist in the specified time range
 
 Usage:
-    # Local DB2 connection (assumes running as db2inst1)
+    # Local DB2 connection (runs DB2 commands as db2inst1 via sudo su)
     python load_audit_files.py --connection local --start-time "2024-01-01 00:00:00" --end-time "2024-01-31 23:59:59"
     
     # JDBC connection
@@ -25,11 +25,11 @@ import sys
 import os
 from datetime import datetime
 
-# Add parent directory to path to import Db2AuditS3Downloader and Db2AuditAliasDownloader
+# Add parent directory to path to import converter classes
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'converter'))
 
 from Db2AuditS3Downloader import Db2AuditS3Downloader
-from Db2AuditAliasDownloader import Db2AuditAliasDownloader
+from Db2AuditBinaryExtractor import Db2AuditBinaryExtractor
 from Db2AuditLoader import Db2AuditLoader
 from Db2TableManager import Db2TableManager
 
@@ -82,7 +82,7 @@ def parse_args():
     
     # S3/COS options
     parser.add_argument('--bucket', help='S3/COS bucket name')
-    parser.add_argument('--cos-alias', help='db2RemStgManager COS alias (alternative to --bucket and credentials)')
+    parser.add_argument('--cos-alias', help='db2RemStgManager COS alias — downloads binary audit logs and extracts to DEL format (alternative to --bucket)')
     parser.add_argument('--db2-user', default='db2inst1', help='OS user for db2audit / db2RemStgManager commands (default: db2inst1)')
     parser.add_argument('--s3-prefix', default='', help='S3 prefix/folder path')
     parser.add_argument('--cos-endpoint', help='IBM COS endpoint URL')
@@ -112,7 +112,12 @@ def parse_args():
     parser.add_argument(
         '--local-dir',
         default='del_files',
-        help='Local directory for downloaded files (default: del_files)'
+        help='Local directory for downloaded/extracted files (default: del_files)'
+    )
+    parser.add_argument(
+        '--extract-dir',
+        default=None,
+        help='Directory for extracted DEL files when using --cos-alias (default: <local-dir>/del_extracted)'
     )
     parser.add_argument(
         '--skip-download',
@@ -187,7 +192,8 @@ def main():
             jdbc_url=args.jdbc_url,
             jdbc_user=args.jdbc_user,
             jdbc_password=args.jdbc_password,
-            jdbc_driver=args.jdbc_driver
+            jdbc_driver=args.jdbc_driver,
+            db2_user=args.db2_user
         )
         loader.connect()
     except Exception as e:
@@ -227,13 +233,22 @@ def main():
             
             try:
                 if args.cos_alias:
-                    downloader = Db2AuditAliasDownloader(
+                    # COS alias path — handles both binary logs (download + db2audit extract)
+                    # and pre-extracted DEL files (download directly), based on what's in COS.
+                    extractor = Db2AuditBinaryExtractor(
                         cos_alias=args.cos_alias,
-                        s3_prefix=args.s3_prefix,
-                        local_dir=args.local_dir,
+                        download_dir=args.local_dir,
+                        extract_dir=args.extract_dir,
                         log_file="s3_download.log",
                         db2_user=args.db2_user
                     )
+                    result = extractor.download_and_extract_in_range(
+                        start_time=args.start_time,
+                        end_time=args.end_time
+                    )
+                    downloaded_files = result.get('del_files', [])
+                    # Load from the extract directory where DEL files were written
+                    args.local_dir = result.get('del_dir', args.local_dir)
                 else:
                     downloader = Db2AuditS3Downloader(
                         bucket_name=args.bucket,
@@ -245,17 +260,15 @@ def main():
                         cos_secret_access_key=args.cos_secret_key,
                         region=args.cos_region
                     )
-                
-                result = downloader.download_files_in_range(
-                    start_time=args.start_time,
-                    end_time=args.end_time
-                )
-                
-                downloaded_files = result.get('downloaded', [])
-                
+                    result = downloader.download_files_in_range(
+                        start_time=args.start_time,
+                        end_time=args.end_time
+                    )
+                    downloaded_files = result.get('downloaded', [])
+
                 if not downloaded_files:
-                    target_source = f"alias {args.cos_alias}" if args.cos_alias else f"bucket {args.bucket}"
-                    print(f"⚠️  No files downloaded. Check time range and S3 {target_source}.")
+                    target_source = f"COS alias {args.cos_alias}" if args.cos_alias else f"bucket {args.bucket}"
+                    print(f"⚠️  No files downloaded/extracted. Check time range and {target_source}.")
                     loader.disconnect()
                     return
                 
