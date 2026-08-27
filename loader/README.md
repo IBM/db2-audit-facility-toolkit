@@ -5,9 +5,10 @@ This project provides tools to download DB2 audit files from IBM Cloud Object St
 ## Features
 
 - **Download DEL files** from IBM COS with time-based filtering
+- **COS alias download**: Download binary logs or DEL files via `db2RemStgManager` using a configured COS alias (no S3 credentials required)
 - **Automatic table creation** using DDL definitions from `db2audit.ddl`
 - **Two connection modes**:
-  - **Local**: Direct connection assuming `db2inst1` user on DB2 server
+  - **Local**: Runs DB2 commands as the configured `db2_user` via `sudo su`
   - **JDBC**: Remote connection using JDBC driver
 - **LOAD operations** for efficient bulk data loading
 - **Time range validation** to ensure data integrity
@@ -17,8 +18,8 @@ This project provides tools to download DB2 audit files from IBM Cloud Object St
 
 ### For Local Connection Mode
 - Running on a system with DB2 server installed
-- User must be `db2inst1` or have equivalent DB2 privileges
-- DB2 command-line tools available in PATH
+- The invoking user must have `sudo su - <db2_user>` rights (default `db2_user` is `db2inst1`)
+- DB2 command-line tools available in PATH for `db2_user`
 
 ### For JDBC Connection Mode
 - Python 3.13+
@@ -57,7 +58,7 @@ loader/
 
 ### 1. Download and Load Audit Files
 
-#### Local Connection (Running as db2inst1)
+#### Local connection — download from S3/COS bucket
 
 ```bash
 python load_audit_files.py \
@@ -66,6 +67,29 @@ python load_audit_files.py \
   --cos-endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
   --cos-access-key YOUR_ACCESS_KEY \
   --cos-secret-key YOUR_SECRET_KEY \
+  --start-time "2024-01-01 00:00:00" \
+  --end-time "2024-01-31 23:59:59"
+```
+
+#### Local connection — download via COS alias
+
+Use this when the Db2 server has a `db2RemStgManager` COS alias configured. The loader will download binary audit logs, extract them to DEL format via `db2audit`, and then load the resulting DEL files. Pre-extracted DEL files stored in COS are downloaded directly.
+
+```bash
+python load_audit_files.py \
+  --connection local \
+  --cos-alias MY_COS_ALIAS \
+  --start-time "2024-01-01 00:00:00" \
+  --end-time "2024-01-31 23:59:59"
+```
+
+Use `--db2-user` if your Db2 instance user is not `db2inst1`:
+
+```bash
+python load_audit_files.py \
+  --connection local \
+  --cos-alias MY_COS_ALIAS \
+  --db2-user db2inst2 \
   --start-time "2024-01-01 00:00:00" \
   --end-time "2024-01-31 23:59:59"
 ```
@@ -118,18 +142,21 @@ python validate_audit_data.py \
 | `--connection` | Connection type: `local` or `jdbc` | `local` |
 | `--database` | Database name | `BLUDB` |
 | `--schema` | Schema for tables | `DB2INST1` |
-| `--jdbc-url` | JDBC connection URL (required for jdbc) | - |
-| `--jdbc-user` | JDBC username (required for jdbc) | - |
-| `--jdbc-password` | JDBC password (required for jdbc) | - |
-| `--bucket` | S3/COS bucket name (required) | - |
+| `--jdbc-url` | JDBC connection URL (required for `jdbc`) | - |
+| `--jdbc-user` | JDBC username (required for `jdbc`) | - |
+| `--jdbc-password` | JDBC password (required for `jdbc`) | - |
+| `--bucket` | S3/COS bucket name (mutually exclusive with `--cos-alias`) | - |
+| `--cos-alias` | `db2RemStgManager` COS alias — downloads binary logs and extracts to DEL (mutually exclusive with `--bucket`) | - |
+| `--db2-user` | OS user for `db2audit` / `db2RemStgManager` / `db2` commands | `db2inst1` |
 | `--s3-prefix` | S3 prefix/folder path | `""` |
-| `--cos-endpoint` | IBM COS endpoint URL | - |
-| `--cos-access-key` | IBM COS access key ID | - |
-| `--cos-secret-key` | IBM COS secret access key | - |
+| `--cos-endpoint` | IBM COS endpoint URL (required with `--bucket`) | - |
+| `--cos-access-key` | IBM COS access key ID (required with `--bucket`) | - |
+| `--cos-secret-key` | IBM COS secret access key (required with `--bucket`) | - |
 | `--start-time` | Start time (YYYY-MM-DD HH:MM:SS) (required) | - |
 | `--end-time` | End time (YYYY-MM-DD HH:MM:SS) (required) | - |
 | `--load-type` | Load type: `insert` or `replace` | `insert` |
-| `--local-dir` | Local directory for downloaded files | `del_files` |
+| `--local-dir` | Local directory for downloaded/extracted files | `del_files` |
+| `--extract-dir` | Directory for DEL files when using `--cos-alias` (default: `<local-dir>/del_extracted`) | - |
 | `--skip-download` | Skip download, use existing files | `false` |
 | `--skip-table-check` | Skip table existence check | `false` |
 | `--validate-only` | Only validate, don't download/load | `false` |
@@ -181,9 +208,14 @@ Tables are created using definitions from `../converter/db2audit.ddl`. The loade
 
 ## File Format
 
-Only **DEL format** files are processed. Binary audit files are not supported by this loader.
+Only **DEL format** files are processed. Binary audit files must first be extracted to DEL format via `db2audit extract` — this is handled automatically when using `--cos-alias`.
 
-Expected filename pattern: `<category>.del` (e.g., `audit.del`, `execute.del`)
+Expected filename patterns:
+
+- Short form (produced by `db2audit extract` locally): `<CATEGORY>.del` (e.g., `AUDIT.del`, `EXECUTE.del`)
+- Long form (produced by the S3/alias downloader): `db2audit.db.<DBNAME>.log.<n>.<timestamp>.<CATEGORY>.del`
+
+Both patterns are recognised and processed automatically.
 
 The loader uses these LOAD modifiers:
 - `CHARDEL:` - Character delimiter
@@ -272,19 +304,20 @@ python validate_audit_data.py \
 
 ### Local Connection Issues
 
-1. **db2 command not found**: Ensure DB2 is installed and in PATH
+1. **db2 command not found**: Ensure DB2 is installed and in `db2_user`'s PATH
    ```bash
    export PATH=/opt/ibm/db2/V11.5/bin:$PATH
    ```
 
-2. **SQL1024N**: Database not started
+2. **SQL1024N**: Database not started — start it as `db2_user`
    ```bash
-   db2start
+   sudo su - db2inst1 -c 'db2start'
    ```
 
-3. **Permission denied**: Must run as `db2inst1` user
+3. **Permission denied / sudo not configured**: The invoking user must be allowed to run `sudo su - db2inst1`. Add a sudoers entry if needed:
    ```bash
-   su - db2inst1
+   # /etc/sudoers.d/db2-audit-toolkit
+   youruser ALL=(root) NOPASSWD: /bin/su - db2inst1 -c *
    ```
 
 ### Load Issues
@@ -298,7 +331,8 @@ python validate_audit_data.py \
 ## Integration with Existing Tools
 
 This loader integrates with:
-- `Db2AuditS3Downloader` from `../converter/`
+- `Db2AuditS3Downloader` from `../converter/` (used when `--bucket` is specified)
+- `Db2AuditBinaryExtractor` from `../converter/` (used when `--cos-alias` is specified)
 - Table definitions from `../converter/db2audit.ddl`
 - Can be used alongside `../converter/` for CSV conversion workflows
 

@@ -68,7 +68,7 @@ Example:
 
 #### Option A: Local connection
 
-Use local mode when you are running on the Db2 server as `db2inst1` or an equivalent user with Db2 access.
+Use local mode when you are running on the Db2 server as a user with `sudo su - db2inst1` rights. DB2 commands are run as `db2inst1` (or the user specified with `--db2-user`) via `sudo su`.
 
 #### Option B: JDBC connection
 
@@ -85,6 +85,34 @@ python loader/load_audit_files.py \
   --cos-endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
   --cos-access-key $COS_ACCESS_KEY \
   --cos-secret-key $COS_SECRET_KEY \
+  --start-time "2025-01-15 00:00:00" \
+  --end-time "2025-01-15 23:59:59"
+```
+
+#### Alternative: Using a configured Db2 COS Alias
+
+If your Db2 server has a Cloud Object Storage (COS) alias configured via `db2RemStgManager`, you can use it instead of passing bucket, endpoint, and credential details directly.
+
+The loader uses `Db2AuditBinaryExtractor` to list all files in COS for the given time range. It handles two file types automatically:
+
+- **Binary audit logs** (no `.del` extension) — downloaded to `--local-dir`, then extracted to DEL format via `db2audit extract`
+- **Pre-extracted DEL files** (`.del` extension) — downloaded directly to the extract directory
+
+```bash
+python loader/load_audit_files.py \
+  --connection local \
+  --cos-alias MY_COS_ALIAS \
+  --start-time "2025-01-15 00:00:00" \
+  --end-time "2025-01-15 23:59:59"
+```
+
+Use `--db2-user` if your Db2 instance user is not `db2inst1`:
+
+```bash
+python loader/load_audit_files.py \
+  --connection local \
+  --cos-alias MY_COS_ALIAS \
+  --db2-user db2inst2 \
   --start-time "2025-01-15 00:00:00" \
   --end-time "2025-01-15 23:59:59"
 ```
@@ -378,8 +406,7 @@ Example:
 python converter/db2audit_converter.py --extract --convert \
   --cos-alias MY_COS_ALIAS \
   --binary-files db2audit.db.BLUDB.log.0.20250112103400000000 \
-  --ddl-file converter/db2audit.ddl \
-  --output-dir ./csv_output
+  --ddl-file converter/db2audit.ddl
 ```
 
 ---
@@ -390,10 +417,10 @@ python converter/db2audit_converter.py --extract --convert \
 
 Check the following:
 
-- bucket name
-- COS endpoint
-- access key and secret key
-- time range
+- bucket name (when using `--bucket`)
+- COS alias name and `db2RemStgManager` registration (when using `--cos-alias`)
+- COS endpoint, access key, and secret key (when using `--bucket`)
+- time range — verify it matches the timestamps in the audit log filenames
 - bucket folder or prefix settings, if used
 
 ### Db2 loading failed
@@ -403,6 +430,7 @@ Check the following:
 - local or JDBC connection settings
 - Db2 availability
 - JDBC driver setup for remote mode
+- for local mode: confirm the invoking user has `sudo su - db2inst1` rights
 - permissions to create tables and run loads
 
 ### CSV conversion failed

@@ -20,6 +20,17 @@ import subprocess
 from datetime import datetime
 
 
+def _parse_timestamp_from_filename(filename):
+    """Return datetime from a binary audit log filename, or None."""
+    match = re.search(r"\.\d+\.(\d{20})", filename)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y%m%d%H%M%S%f")
+        except ValueError:
+            pass
+    return None
+
+
 class Db2AuditBinaryExtractor:
     """
     Downloads binary Db2 audit log files from IBM COS via db2RemStgManager and
@@ -27,8 +38,9 @@ class Db2AuditBinaryExtractor:
     that has db2inst1 configured.
     """
 
-    # Audit binary files match this pattern (no extension)
-    BINARY_FILE_PATTERN = re.compile(r"^db2audit\.db\.BLUDB\.log\.0\.\d{20}$")
+    # Audit binary files match this pattern (no extension).
+    # Matches any log segment number (0, 1, 2, …), any database name.
+    BINARY_FILE_PATTERN = re.compile(r"^db2audit\.db\.[a-zA-Z0-9_]+\.log\.\d+\.\d{20}$")
 
     def __init__(
         self,
@@ -56,8 +68,8 @@ class Db2AuditBinaryExtractor:
             Defaults to ``db2inst1``.
         """
         self.cos_alias = cos_alias
-        self.download_dir = download_dir
-        self.extract_dir = extract_dir or os.path.join(download_dir, "del_extracted")
+        self.download_dir = os.path.abspath(download_dir)
+        self.extract_dir = os.path.abspath(extract_dir) if extract_dir else os.path.join(self.download_dir, "del_extracted")
         self.log_file = log_file
         self.db2_user = db2_user
 
@@ -66,6 +78,11 @@ class Db2AuditBinaryExtractor:
 
         os.makedirs(self.download_dir, exist_ok=True)
         os.makedirs(self.extract_dir, exist_ok=True)
+        try:
+            os.chmod(self.download_dir, 0o775)
+            os.chmod(self.extract_dir, 0o775)
+        except OSError as e:
+            self.log(f"⚠️  Could not set directory permissions: {e}")
 
     # ------------------------------------------------------------------
     # Logging
@@ -160,8 +177,8 @@ class Db2AuditBinaryExtractor:
 
     def extract_to_del(self, binary_file_path):
         """
-        Run ``db2audit extract`` on a single binary log file, producing DEL files
-        in *extract_dir*.
+        Run ``db2audit extract`` on a single binary log file, appending data into
+        the category DEL files in *extract_dir*.
 
         Parameters
         ----------
@@ -170,9 +187,10 @@ class Db2AuditBinaryExtractor:
 
         Returns
         -------
-        list[str] of DEL file paths written to *extract_dir*, or empty list on failure.
+        bool — True on success, False on failure.
         """
         abs_path = os.path.abspath(binary_file_path)
+
         cmd = (
             f"db2audit extract delasc delimiter '\"' "
             f"to {self.extract_dir} from files {abs_path}"
@@ -180,15 +198,10 @@ class Db2AuditBinaryExtractor:
         output, rc = self._run_as_db2inst1(cmd)
         if rc != 0:
             self.log(f"❌ db2audit extract failed for {abs_path}: {output}")
-            return []
+            return False
 
-        del_files = [
-            os.path.join(self.extract_dir, f)
-            for f in os.listdir(self.extract_dir)
-            if f.endswith(".del")
-        ]
-        self.log(f"✅ Extracted {abs_path} → {len(del_files)} DEL file(s) in {self.extract_dir}")
-        return del_files
+        self.log(f"✅ Extracted {abs_path} → {self.extract_dir}")
+        return True
 
     # ------------------------------------------------------------------
     # Combined workflow
@@ -209,15 +222,156 @@ class Db2AuditBinaryExtractor:
         errors = dl_result["errors"]
 
         for local_path in dl_result["downloaded"]:
-            extracted = self.extract_to_del(local_path)
-            if not extracted:
+            if not self.extract_to_del(local_path):
                 errors += 1
 
-        del_files = [
+        all_del_files = [
             os.path.join(self.extract_dir, f)
-            for f in os.listdir(self.extract_dir)
+            for f in sorted(os.listdir(self.extract_dir))
+            if f.endswith(".del")
+        ]
+        self.log(f"📊 Workflow complete — {len(all_del_files)} DEL file(s) ready in {self.extract_dir}")
+        return {"del_dir": self.extract_dir, "del_files": all_del_files, "errors": errors}
+
+    def download_and_extract_in_range(self, start_time=None, end_time=None):
+        """
+        List audit files from COS, filter by time range, and process each:
+        - Binary log files (no extension) are downloaded to ``download_dir``
+          then extracted to DEL format via ``db2audit extract``.
+        - Pre-extracted DEL files are downloaded directly to ``extract_dir``.
+
+        Parameters
+        ----------
+        start_time : str or datetime
+            Inclusive start of the time window (``YYYY-MM-DD HH:MM:SS`` or datetime).
+        end_time : str or datetime
+            Inclusive end of the time window (``YYYY-MM-DD HH:MM:SS`` or datetime).
+
+        Returns
+        -------
+        dict with keys:
+            ``del_dir``          — path to the directory containing DEL files
+            ``del_files``        — list of ready-to-load DEL file paths
+            ``binary_downloaded``— number of binary logs downloaded and extracted
+            ``del_downloaded``   — number of DEL files downloaded directly
+            ``errors``           — total error count
+        """
+        if not start_time and not end_time:
+            self.log("⚠️ No time range provided — skipping download.")
+            return {"del_dir": self.extract_dir, "del_files": [], "binary_downloaded": 0, "del_downloaded": 0, "errors": 0}
+
+        if isinstance(start_time, str):
+            start_time = datetime.fromisoformat(start_time)
+        if isinstance(end_time, str):
+            end_time = datetime.fromisoformat(end_time)
+
+        if start_time and end_time and start_time > end_time:
+            self.log(f"❌ Invalid time range: start ({start_time}) is after end ({end_time})")
+            return {"del_dir": self.extract_dir, "del_files": [], "binary_downloaded": 0, "del_downloaded": 0, "errors": 0}
+
+        # List all files in COS alias
+        cmd = f"db2RemStgManager ALIAS LIST source=DB2REMOTE://{self.cos_alias}//"
+        output, rc = self._run_as_db2inst1(cmd)
+        if rc != 0:
+            self.log(f"❌ Failed to list files from COS alias: {output}")
+            return {"del_dir": self.extract_dir, "del_files": [], "binary_downloaded": 0, "del_downloaded": 0, "errors": 1}
+
+        # Separate filenames into binary logs and pre-extracted DEL files
+        binary_in_range = []
+        del_in_range = []
+        seen = set()
+
+        for line in output.splitlines():
+            # Match DEL files: db2audit.db.DBNAME.log.N.TIMESTAMP.CATEGORY.del
+            del_match = re.search(
+                r"(db2audit\.db\.[a-zA-Z0-9_]+\.log\.\d+\.\d{20}\.[a-zA-Z0-9_]+\.del)",
+                line, re.IGNORECASE
+            )
+            # Match binary log files: db2audit.db.DBNAME.log.N.TIMESTAMP  (no extension)
+            bin_match = re.search(
+                r"(db2audit\.db\.[a-zA-Z0-9_]+\.log\.\d+\.\d{20})(?!\S)",
+                line, re.IGNORECASE
+            )
+
+            if del_match:
+                filename = del_match.group(1)
+            elif bin_match:
+                filename = bin_match.group(1)
+            else:
+                continue
+
+            if filename in seen:
+                continue
+            seen.add(filename)
+
+            ts = _parse_timestamp_from_filename(filename)
+            if not ts:
+                continue
+
+            in_range = (
+                (start_time and end_time and start_time <= ts <= end_time) or
+                (start_time and not end_time and ts >= start_time) or
+                (end_time and not start_time and ts <= end_time)
+            )
+            if not in_range:
+                continue
+
+            if del_match:
+                del_in_range.append(filename)
+            else:
+                binary_in_range.append(filename)
+
+        self.log(f"🔍 Found {len(binary_in_range)} binary log(s) and {len(del_in_range)} DEL file(s) in time range.")
+
+        all_del_files = []
+        errors = 0
+        binary_downloaded = 0
+        del_downloaded = 0
+
+        # Process binary logs: download → db2audit extract
+        for filename in binary_in_range:
+            local_path = self._download_cos_file(filename)
+            if not local_path:
+                errors += 1
+                continue
+            binary_downloaded += 1
+            if not self.extract_to_del(local_path):
+                errors += 1
+
+        # Process DEL files: download directly to extract_dir
+        for filename in del_in_range:
+            target = os.path.join(self.extract_dir, os.path.basename(filename))
+            source_path = f"DB2REMOTE://{self.cos_alias}//{filename}"
+            cmd = f"db2RemStgManager ALIAS GET source={source_path} target={target}"
+            dl_output, rc = self._run_as_db2inst1(cmd)
+            if rc == 0:
+                self.log(f"✅ Downloaded DEL {filename} → {target}")
+                del_downloaded += 1
+            else:
+                self.log(f"❌ Failed to download DEL {filename}: {dl_output}")
+                errors += 1
+
+        # Collect all DEL files present after all downloads and extractions.
+        # db2audit extract appends into existing category files, so we cannot
+        # diff before/after per-file — read the final state once at the end.
+        all_del_files = [
+            os.path.join(self.extract_dir, f)
+            for f in sorted(os.listdir(self.extract_dir))
             if f.endswith(".del")
         ]
 
-        self.log(f"📊 Workflow complete — {len(del_files)} DEL file(s) ready in {self.extract_dir}")
-        return {"del_dir": self.extract_dir, "del_files": del_files, "errors": errors}
+        range_desc = f"{start_time or '...'} → {end_time or '...'}"
+        self.log(f"\n✨ COS Alias Download Summary:")
+        self.log(f"  ⏰ Range: {range_desc}")
+        self.log(f"  📥 Binary logs downloaded + extracted: {binary_downloaded}")
+        self.log(f"  📄 DEL files downloaded directly: {del_downloaded}")
+        self.log(f"  ✅ Total DEL files ready: {len(all_del_files)}")
+        self.log(f"  ❌ Errors: {errors}")
+
+        return {
+            "del_dir": self.extract_dir,
+            "del_files": all_del_files,
+            "binary_downloaded": binary_downloaded,
+            "del_downloaded": del_downloaded,
+            "errors": errors,
+        }

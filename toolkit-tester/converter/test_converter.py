@@ -17,6 +17,7 @@ import sys
 import unittest
 import tempfile
 import shutil
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'converte
 
 from Db2AuditDelimitedConverter import Db2AuditDelimitedConverter
 from Db2AuditBinaryExtractor import Db2AuditBinaryExtractor
+from Db2AuditAliasDownloader import Db2AuditAliasDownloader
 
 
 class TestDb2AuditConverter(unittest.TestCase):
@@ -263,6 +265,31 @@ CREATE TABLE CHECKING (
             
             # Should have same number of data rows
             self.assertEqual(del_lines, csv_lines)
+
+    def test_short_del_filenames(self):
+        """Test that short DEL filenames (e.g. audit.del) produced by db2audit extract are converted."""
+        # Write a short-named DEL file alongside the existing long-named ones
+        short_del = os.path.join(self.del_dir, 'audit.del')
+        with open(short_del, 'w') as f:
+            f.write('"2025-06-01-10.00.00.000000","AUDIT","CONNECT","0","SHORTUSER"\n')
+
+        converter = Db2AuditDelimitedConverter(
+            ddl_file=self.ddl_file,
+            del_dir=self.del_dir,
+            output_dir=self.output_dir,
+            log_file=self.log_file
+        )
+        converter.process_all()
+
+        # CSV must exist and contain the data row
+        audit_csv = [f for f in os.listdir(self.output_dir) if f.lower() == 'audit.csv']
+        self.assertTrue(audit_csv, "audit.csv was not produced from audit.del")
+        csv_path = os.path.join(self.output_dir, audit_csv[0])
+        with open(csv_path, 'r') as f:
+            rows = f.readlines()
+        # One header + one data row
+        self.assertEqual(len(rows), 2)
+        self.assertIn('SHORTUSER', rows[1])
 
 
 class TestConverterSecurity(unittest.TestCase):
@@ -505,30 +532,24 @@ class TestDb2AuditBinaryExtractor(unittest.TestCase):
     # extract_to_del — filesystem-only behaviour
     # ------------------------------------------------------------------
 
-    def test_extract_to_del_returns_empty_on_nonzero_rc(self):
-        """extract_to_del() must return [] when the shell command fails."""
+    def test_extract_to_del_returns_false_on_nonzero_rc(self):
+        """extract_to_del() must return False when the shell command fails."""
         extractor = self._make_extractor()
 
         # Stub _run_as_db2inst1 to simulate a failure
         extractor._run_as_db2inst1 = lambda cmd: ('error output', 1)
 
         result = extractor.extract_to_del('/tmp/fake_binary_log')
-        self.assertEqual(result, [])
+        self.assertFalse(result)
 
-    def test_extract_to_del_returns_del_files_on_success(self):
-        """extract_to_del() must return the .del files written to extract_dir."""
+    def test_extract_to_del_returns_true_on_success(self):
+        """extract_to_del() must return True when the shell command succeeds."""
         extractor = self._make_extractor()
 
-        # Pre-populate extract_dir with a fake DEL file
-        fake_del = os.path.join(self.extract_dir, 'db2audit.db.BLUDB.log.0.20250112103400000000.AUDIT.del')
-        open(fake_del, 'w').close()
-
-        # Stub the command to succeed
         extractor._run_as_db2inst1 = lambda cmd: ('', 0)
 
         result = extractor.extract_to_del('/tmp/fake_binary_log')
-        self.assertTrue(len(result) >= 1)
-        self.assertTrue(all(f.endswith('.del') for f in result))
+        self.assertTrue(result)
 
     # ------------------------------------------------------------------
     # download_and_extract — integration of both steps
@@ -564,6 +585,94 @@ class TestDb2AuditBinaryExtractor(unittest.TestCase):
         self.assertGreaterEqual(result['errors'], 1)
 
 
+class TestDb2AuditAliasDownloader(unittest.TestCase):
+    """Test cases for Db2AuditAliasDownloader."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix='alias_downloader_test_')
+        self.local_dir = os.path.join(self.test_dir, 'del_files')
+        self.log_file = os.path.join(self.test_dir, 'download.log')
+
+    def tearDown(self):
+        if os.path.exists(self.test_dir):
+            shutil.rmtree(self.test_dir)
+
+    def _make_downloader(self, cos_alias='TEST_ALIAS', s3_prefix=''):
+        return Db2AuditAliasDownloader(
+            cos_alias=cos_alias,
+            s3_prefix=s3_prefix,
+            local_dir=self.local_dir,
+            log_file=self.log_file,
+            db2_user='db2inst1'
+        )
+
+    def test_initialization_creates_dir_and_log(self):
+        """Constructor must create local_dir and initialize the log file."""
+        downloader = self._make_downloader()
+        self.assertTrue(os.path.isdir(self.local_dir))
+        self.assertTrue(os.path.exists(self.log_file))
+
+    def test_initialization_stores_properties(self):
+        """Properties must be stored on the instance."""
+        downloader = self._make_downloader('MY_ALIAS', 'my_prefix')
+        self.assertEqual(downloader.cos_alias, 'MY_ALIAS')
+        self.assertEqual(downloader.s3_prefix, 'my_prefix')
+        self.assertEqual(downloader.db2_user, 'db2inst1')
+
+    def test_parse_timestamp_from_filename(self):
+        """Timestamp must be parsed correctly from standard file names."""
+        downloader = self._make_downloader()
+        filename = 'db2audit.db.BLUDB.log.0.20240101120000000000.AUDIT.del'
+        ts = downloader.parse_timestamp_from_filename(filename)
+        self.assertEqual(ts, datetime(2024, 1, 1, 12, 0, 0))
+
+    def test_download_files_in_range_requires_time(self):
+        """If no start_time or end_time is provided, download must be skipped."""
+        downloader = self._make_downloader()
+        result = downloader.download_files_in_range()
+        self.assertEqual(result['downloaded'], [])
+        self.assertEqual(result['errors'], 0)
+
+    def test_download_files_in_range_invalid_range(self):
+        """If start_time is after end_time, download must be skipped with empty list."""
+        downloader = self._make_downloader()
+        result = downloader.download_files_in_range('2024-01-02 00:00:00', '2024-01-01 00:00:00')
+        self.assertEqual(result['downloaded'], [])
+        self.assertEqual(result['errors'], 0)
+
+    def test_download_files_in_range_success(self):
+        """Standard success path with mocked list and download."""
+        downloader = self._make_downloader()
+
+        # Mock db2RemStgManager command outputs
+        # 1. ALIAS LIST command output
+        mock_list_output = """
+Total number of files found = 2
+DB2REMOTE://TEST_ALIAS//db2audit.db.BLUDB.log.0.20240101120000000000.AUDIT.del
+DB2REMOTE://TEST_ALIAS//db2audit.db.BLUDB.log.0.20240102120000000000.AUDIT.del
+"""
+        # Mock run command helper to simulate listing and downloading
+        def mock_run_cmd(cmd):
+            if "ALIAS LIST" in cmd:
+                return mock_list_output, 0
+            elif "ALIAS GET" in cmd:
+                # Extract filename to touch the target file
+                filename_match = re.search(r"target=(.*)", cmd)
+                if filename_match:
+                    target_path = filename_match.group(1).strip()
+                    open(target_path, 'w').close()
+                return "Download successful", 0
+            return "", 0
+
+        downloader._run_as_db2inst1 = mock_run_cmd
+
+        # Run for range covering only the first file
+        result = downloader.download_files_in_range('2024-01-01 00:00:00', '2024-01-01 23:59:59')
+        self.assertEqual(len(result['downloaded']), 1)
+        self.assertEqual(result['errors'], 0)
+        self.assertTrue(os.path.exists(result['downloaded'][0]))
+
+
 def run_tests():
     """Run all tests and generate report"""
     # Create test suite
@@ -573,6 +682,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditConverter))
     suite.addTests(loader.loadTestsFromTestCase(TestConverterSecurity))
     suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditBinaryExtractor))
+    suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditAliasDownloader))
 
     # Run tests with detailed output
     runner = unittest.TextTestRunner(verbosity=2)
