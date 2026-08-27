@@ -266,6 +266,31 @@ CREATE TABLE CHECKING (
             # Should have same number of data rows
             self.assertEqual(del_lines, csv_lines)
 
+    def test_short_del_filenames(self):
+        """Test that short DEL filenames (e.g. audit.del) produced by db2audit extract are converted."""
+        # Write a short-named DEL file alongside the existing long-named ones
+        short_del = os.path.join(self.del_dir, 'audit.del')
+        with open(short_del, 'w') as f:
+            f.write('"2025-06-01-10.00.00.000000","AUDIT","CONNECT","0","SHORTUSER"\n')
+
+        converter = Db2AuditDelimitedConverter(
+            ddl_file=self.ddl_file,
+            del_dir=self.del_dir,
+            output_dir=self.output_dir,
+            log_file=self.log_file
+        )
+        converter.process_all()
+
+        # CSV must exist and contain the data row
+        audit_csv = [f for f in os.listdir(self.output_dir) if f.lower() == 'audit.csv']
+        self.assertTrue(audit_csv, "audit.csv was not produced from audit.del")
+        csv_path = os.path.join(self.output_dir, audit_csv[0])
+        with open(csv_path, 'r') as f:
+            rows = f.readlines()
+        # One header + one data row
+        self.assertEqual(len(rows), 2)
+        self.assertIn('SHORTUSER', rows[1])
+
 
 class TestConverterSecurity(unittest.TestCase):
     """Security-focused test cases"""
