@@ -532,30 +532,24 @@ class TestDb2AuditBinaryExtractor(unittest.TestCase):
     # extract_to_del — filesystem-only behaviour
     # ------------------------------------------------------------------
 
-    def test_extract_to_del_returns_empty_on_nonzero_rc(self):
-        """extract_to_del() must return [] when the shell command fails."""
+    def test_extract_to_del_returns_false_on_nonzero_rc(self):
+        """extract_to_del() must return False when the shell command fails."""
         extractor = self._make_extractor()
 
         # Stub _run_as_db2inst1 to simulate a failure
         extractor._run_as_db2inst1 = lambda cmd: ('error output', 1)
 
         result = extractor.extract_to_del('/tmp/fake_binary_log')
-        self.assertEqual(result, [])
+        self.assertFalse(result)
 
-    def test_extract_to_del_returns_del_files_on_success(self):
-        """extract_to_del() must return the .del files written to extract_dir."""
+    def test_extract_to_del_returns_true_on_success(self):
+        """extract_to_del() must return True when the shell command succeeds."""
         extractor = self._make_extractor()
 
-        # Pre-populate extract_dir with a fake DEL file
-        fake_del = os.path.join(self.extract_dir, 'db2audit.db.BLUDB.log.0.20250112103400000000.AUDIT.del')
-        open(fake_del, 'w').close()
-
-        # Stub the command to succeed
         extractor._run_as_db2inst1 = lambda cmd: ('', 0)
 
         result = extractor.extract_to_del('/tmp/fake_binary_log')
-        self.assertTrue(len(result) >= 1)
-        self.assertTrue(all(f.endswith('.del') for f in result))
+        self.assertTrue(result)
 
     # ------------------------------------------------------------------
     # download_and_extract — integration of both steps
