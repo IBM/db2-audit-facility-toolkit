@@ -42,7 +42,8 @@ class Db2AuditLoader:
         jdbc_url: Optional[str] = None,
         jdbc_user: Optional[str] = None,
         jdbc_password: Optional[str] = None,
-        jdbc_driver: str = "com.ibm.db2.jcc.DB2Driver"
+        jdbc_driver: str = "com.ibm.db2.jcc.DB2Driver",
+        db2_user: str = "db2inst1"
     ):
         """
         Initialize the Db2AuditLoader.
@@ -56,6 +57,7 @@ class Db2AuditLoader:
             jdbc_user: JDBC username (required if connection_type="jdbc")
             jdbc_password: JDBC password (required if connection_type="jdbc")
             jdbc_driver: JDBC driver class name
+            db2_user: OS user for local DB2 commands (default: db2inst1)
         """
         self.connection_type = connection_type.lower()
         self.database = database
@@ -65,6 +67,7 @@ class Db2AuditLoader:
         self.jdbc_user = jdbc_user
         self.jdbc_password = jdbc_password
         self.jdbc_driver = jdbc_driver
+        self.db2_user = db2_user
         self.conn = None
         
         # Initialize log file
@@ -93,23 +96,28 @@ class Db2AuditLoader:
         with open(self.log_file, "a", encoding="utf-8") as logf:
             logf.write(full_msg + "\n")
     
+    def _run_as_db2_user(self, db2_cmd: str) -> subprocess.CompletedProcess:
+        """Run a db2 command as the configured db2_user via sudo su."""
+        safe = db2_cmd.replace("'", "'\"'\"'")
+        return subprocess.run(
+            f"sudo su - {self.db2_user} -c '{safe}'",
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
     def connect(self):
         """Establish database connection."""
         if self.connection_type == "jdbc":
             self._connect_jdbc()
         else:
             self._connect_local()
-    
+
     def _connect_local(self):
-        """Connect to local DB2 instance (assumes db2inst1 user)."""
+        """Connect to local DB2 instance as db2_user via sudo su."""
         try:
-            # Test connection by running a simple query
-            result = subprocess.run(
-                ["db2", "connect", "to", self.database],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            result = self._run_as_db2_user(f"db2 connect to {self.database}")
             if result.returncode != 0:
                 raise Exception(f"Failed to connect to {self.database}: {result.stderr}")
             self.log(f"✅ Connected to local DB2 database: {self.database}")
@@ -136,7 +144,7 @@ class Db2AuditLoader:
             self.conn.close()
             self.log("✅ JDBC connection closed")
         elif self.connection_type == "local":
-            subprocess.run(["db2", "connect", "reset"], capture_output=True)
+            self._run_as_db2_user("db2 connect reset")
             self.log("✅ Local DB2 connection reset")
     
     def execute_sql(self, sql: str) -> Optional[List[tuple]]:
@@ -149,12 +157,7 @@ class Db2AuditLoader:
     def _execute_local(self, sql: str) -> Optional[List[tuple]]:
         """Execute SQL via local DB2 CLI."""
         try:
-            result = subprocess.run(
-                ["db2", "-x", sql],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            result = self._run_as_db2_user(f"db2 -x {sql}")
             if result.returncode != 0:
                 self.log(f"⚠️ SQL execution warning: {result.stderr}")
             
@@ -266,12 +269,7 @@ class Db2AuditLoader:
         """Execute LOAD command via local DB2 CLI."""
         # Use ADMIN_CMD stored procedure
         sql = f"CALL SYSPROC.ADMIN_CMD('{load_cmd}')"
-        result = subprocess.run(
-            ["db2", "-v", sql],
-            capture_output=True,
-            text=True,
-            check=False
-        )
+        result = self._run_as_db2_user(f"db2 -v \"{sql}\"")
         
         if result.returncode != 0:
             # Check for specific errors
@@ -282,15 +280,10 @@ class Db2AuditLoader:
                 if match:
                     table_name = match.group(1)
                     terminate_cmd = f"LOAD FROM /dev/null OF DEL TERMINATE INTO {table_name}"
-                    subprocess.run(["db2", f"CALL SYSPROC.ADMIN_CMD('{terminate_cmd}')"], 
-                                 capture_output=True)
+                    terminate_sql = f"CALL SYSPROC.ADMIN_CMD('{terminate_cmd}')"
+                    self._run_as_db2_user(f"db2 \"{terminate_sql}\"")
                     # Retry the load
-                    result = subprocess.run(
-                        ["db2", "-v", sql],
-                        capture_output=True,
-                        text=True,
-                        check=False
-                    )
+                    result = self._run_as_db2_user(f"db2 -v \"{sql}\"")
             
             if result.returncode != 0:
                 raise Exception(f"LOAD failed: {result.stderr}")
