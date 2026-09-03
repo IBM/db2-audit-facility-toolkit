@@ -159,8 +159,14 @@ class Db2AuditDelimitedConverter:
     def convert_del_files(self, table, columns):
         """Convert a single .DEL file to CSV with headers and sanitized fields."""
 
-        # Search for file pattern dynamically
-        pattern = re.compile(rf"db2audit\.db\.BLUDB\.log\..\.\d+\.{table}\.del$", re.IGNORECASE)
+        # Match either the full long name produced by the S3/alias downloader:
+        #   db2audit.db.BLUDB.log.<n>.<timestamp>.<CATEGORY>.del
+        # or the short name produced by `db2audit extract`:
+        #   <category>.del
+        pattern = re.compile(
+            rf"(?:db2audit\.db\.\w+\.log\.\d+\.\d+\.)?{table}\.del$",
+            re.IGNORECASE,
+        )
         matching_files = [f for f in os.listdir(self.del_dir) if pattern.match(f)]
 
         for del_file in matching_files:

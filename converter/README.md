@@ -182,7 +182,7 @@ The converter automatically detects and processes these DB2 audit categories:
 ### Binary audit log files (input to `--extract`)
 
 ```
-db2audit.db.BLUDB.log.0.<20-digit-timestamp>
+db2audit.db.<DBNAME>.log.<n>.<20-digit-timestamp>
 ```
 
 Example:
@@ -190,10 +190,10 @@ Example:
 db2audit.db.BLUDB.log.0.20251112193906625682
 ```
 
-### DEL files (produced by extraction or downloaded directly)
+### DEL files — long form (produced by the S3/alias downloader or `--extract`)
 
 ```
-db2audit.db.BLUDB.log.0.<20-digit-timestamp>.<CATEGORY>.del
+db2audit.db.<DBNAME>.log.<n>.<20-digit-timestamp>.<CATEGORY>.del
 ```
 
 Example:
@@ -202,6 +202,23 @@ db2audit.db.BLUDB.log.0.20251112193906625682.EXECUTE.del
 ```
 
 Where `<20-digit-timestamp>` = `YYYYMMDDHHMMSSffffff`.
+
+### DEL files — short form (produced by `db2audit extract` invoked locally)
+
+When `db2audit extract` appends into an existing directory it writes category files without a timestamp prefix:
+
+```
+<CATEGORY>.del
+```
+
+Example:
+```
+EXECUTE.del
+CHECKING.del
+CONTEXT.del
+```
+
+Both long-form and short-form DEL filenames are recognised and processed automatically by the converter.
 
 ## Output Format
 
@@ -218,8 +235,9 @@ Generated CSV files include:
 ```
 converter/
 ├── db2audit_converter.py          # CLI entry point
-├── Db2AuditBinaryExtractor.py     # Binary log download + db2audit extraction class
-├── Db2AuditS3Downloader.py        # COS DEL file downloader class
+├── Db2AuditBinaryExtractor.py     # Binary log download + db2audit extraction class (COS alias, time-range aware)
+├── Db2AuditAliasDownloader.py     # Lightweight COS alias downloader for pre-extracted DEL files
+├── Db2AuditS3Downloader.py        # COS DEL file downloader class (S3-compatible endpoint)
 ├── Db2AuditDelimitedConverter.py  # DEL to CSV converter class
 ├── extract_headers.py             # DDL header inspection utility
 ├── requirements.txt               # Python dependencies
@@ -238,7 +256,7 @@ converter/
 
 You can also use the classes directly in your Python code.
 
-### Binary extraction on a Db2 server
+### Binary extraction on a Db2 server (explicit file list)
 
 ```python
 from Db2AuditBinaryExtractor import Db2AuditBinaryExtractor
@@ -256,6 +274,29 @@ result = extractor.download_and_extract([
 
 print(f"DEL files ready in: {result['del_dir']}")
 print(f"Files: {result['del_files']}")
+```
+
+### Binary extraction on a Db2 server (time-range, handles binary + DEL files)
+
+```python
+from Db2AuditBinaryExtractor import Db2AuditBinaryExtractor
+
+extractor = Db2AuditBinaryExtractor(
+    cos_alias="MY_COS_ALIAS",
+    download_dir="del_files",
+    extract_dir="del_files/del_extracted",
+    log_file="binary_extract_log.txt"
+)
+
+result = extractor.download_and_extract_in_range(
+    start_time="2025-01-15 00:00:00",
+    end_time="2025-01-15 23:59:59"
+)
+
+print(f"DEL files ready in: {result['del_dir']}")
+print(f"Binary logs extracted: {result['binary_downloaded']}")
+print(f"DEL files downloaded directly: {result['del_downloaded']}")
+print(f"Total DEL files: {len(result['del_files'])}")
 ```
 
 ### Download DEL files from COS

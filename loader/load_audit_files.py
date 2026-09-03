@@ -40,10 +40,11 @@ import os
 import re
 from datetime import datetime
 
-# Add parent directory to path to import Db2AuditS3Downloader
+# Add parent directory to path to import converter classes
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'converter'))
 
 from Db2AuditS3Downloader import Db2AuditS3Downloader
+from Db2AuditBinaryExtractor import Db2AuditBinaryExtractor
 from Db2AuditLoader import Db2AuditLoader
 from Db2TableManager import Db2TableManager
 
@@ -129,7 +130,12 @@ Examples:
     parser.add_argument(
         '--local-dir',
         default='del_files',
-        help='Local directory for downloaded files (default: del_files)'
+        help='Local directory for downloaded/extracted files (default: del_files)'
+    )
+    parser.add_argument(
+        '--extract-dir',
+        default=None,
+        help='Directory for extracted DEL files when using --cos-alias (default: <local-dir>/del_extracted)'
     )
     parser.add_argument(
         '--skip-table-check',

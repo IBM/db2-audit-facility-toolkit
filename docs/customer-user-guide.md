@@ -415,10 +415,10 @@ python converter/db2audit_converter.py --extract --convert \
 
 Check the following:
 
-- bucket name
-- COS endpoint
-- access key and secret key
-- time range
+- bucket name (when using `--bucket`)
+- COS alias name and `db2RemStgManager` registration (when using `--cos-alias`)
+- COS endpoint, access key, and secret key (when using `--bucket`)
+- time range — verify it matches the timestamps in the audit log filenames
 - bucket folder or prefix settings, if used
 
 ### Db2 loading failed
@@ -428,6 +428,7 @@ Check the following:
 - local or JDBC connection settings
 - Db2 availability
 - JDBC driver setup for remote mode
+- for local mode: confirm the invoking user has `sudo su - db2inst1` rights
 - permissions to create tables and run loads
 
 ### CSV conversion failed
