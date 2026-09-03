@@ -51,18 +51,18 @@ pip install -r converter/requirements.txt
 
 # On a Db2 server: download binary logs from COS, extract to DEL, convert to CSV
 python converter/db2audit_converter.py --extract --convert \
-  --cos-alias MY_COS_ALIAS \
-  --binary-files db2audit.db.BLUDB.log.0.20250115000000000000 \
+  --cos-alias <your-cos-alias> \
+  --binary-files db2audit.db.BLUDB.log.0.<timestamp> \
   --output-dir ./csv_output
 
 # Download pre-extracted DEL files from COS and convert to CSV
 python converter/db2audit_converter.py --download --convert \
-  --bucket my-audit-bucket \
-  --access-key YOUR_ACCESS_KEY \
-  --secret-key YOUR_SECRET_KEY \
-  --endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
-  --start-time "2025-01-15T00:00:00" \
-  --end-time "2025-01-15T23:59:59" \
+  --bucket <your-bucket> \
+  --access-key $COS_ACCESS_KEY \
+  --secret-key $COS_SECRET_KEY \
+  --endpoint <your-cos-endpoint> \
+  --start-time "<YYYY-MM-DDTHH:MM:SS>" \
+  --end-time "<YYYY-MM-DDTHH:MM:SS>" \
   --output-dir ./csv_output
 
 # Convert already-downloaded DEL files
@@ -77,14 +77,14 @@ See [`converter/README.md`](converter/README.md) for the full command reference,
 
 ### `loader/` — Audit Log DB2 Loader & Validator
 
-**Purpose:** Loads DB2 audit `.del` files directly into DB2 tables using the `LOAD` command for efficient bulk ingestion. Supports two connection modes — a **local** connection (running as `db2inst1` on the DB2 server) and a **JDBC** remote connection. After loading, a separate validation script confirms that records exist within the expected time range.
+**Purpose:** Loads DB2 audit `.del` files directly into DB2 tables using the `LOAD` command for efficient bulk ingestion. Supports two connection modes — a **local** connection (running as `db2inst1` on the DB2 server) and a **JDBC** remote connection. After loading, a separate validation script reports record counts per audit table to confirm the load was successful.
 
 **Key files:**
 
 | File | Description |
 |------|-------------|
 | `load_audit_files.py` | CLI entry point — download from COS, create tables, and load DEL files |
-| `validate_audit_data.py` | Standalone CLI to query record counts and time-range coverage per audit table |
+| `validate_audit_data.py` | Standalone CLI to report record counts per audit table and confirm a successful load |
 | `Db2AuditLoader.py` | Core loader class — manages DB2 connections, executes LOAD commands, handles `SQL0668N` LOAD PENDING state automatically |
 | `Db2TableManager.py` | Reads `db2audit.ddl` and ensures all required audit tables exist before loading |
 | `example_config.sh` | Shell template for exporting credentials and time-range settings as environment variables |
@@ -97,19 +97,14 @@ pip install -r loader/requirements.txt
 # Load audit files (local connection, running as db2inst1)
 python loader/load_audit_files.py \
   --connection local \
-  --bucket my-audit-bucket \
-  --cos-endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
+  --bucket <your-bucket> \
+  --cos-endpoint <your-cos-endpoint> \
   --cos-access-key $COS_ACCESS_KEY \
   --cos-secret-key $COS_SECRET_KEY \
-  --start-time "2025-01-15 00:00:00" \
-  --end-time "2025-01-15 23:59:59"
+  --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 
 # Validate loaded data
-python loader/validate_audit_data.py \
-  --connection local \
-  --start-time "2025-01-15 00:00:00" \
-  --end-time "2025-01-15 23:59:59" \
-  --detailed
+python loader/validate_audit_data.py --connection local
 ```
 
 See [`loader/README.md`](loader/README.md) for the full command reference, JDBC setup, table schema details, and troubleshooting guidance. For customer-focused step-by-step usage instructions, see [`docs/customer-user-guide.md`](docs/customer-user-guide.md).
@@ -182,7 +177,7 @@ IBM COS (binary audit logs)
 
 - **No shared package** — each module (`converter/`, `loader/`, `toolkit-tester/`) is standalone. Run each from its own directory or provide appropriate `sys.path` context.
 - **Credentials** — never commit credentials to version control. Use environment variables or [`loader/example_config.sh`](loader/example_config.sh) as a template.
-- **DDL file** — `db2audit.ddl` is the authoritative source for column headers. The loader references it as `../converter/db2audit.ddl` by default. Obtain yours from `/opt/ibm/db2/V11.5.0.0/misc/db2audit.ddl` on your DB2 server.
+- **DDL file** — `db2audit.ddl` is the authoritative source for column headers. The loader references it as `../converter/db2audit.ddl` by default. Obtain yours from `/opt/ibm/db2/<version>/misc/db2audit.ddl` on your DB2 server.
 
 If you have any questions or issues you can create a new [issue here](https://github.com/IBM/db2-audit-facility-toolkit/issues/new).
 

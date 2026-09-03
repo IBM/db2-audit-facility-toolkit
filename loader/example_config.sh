@@ -18,20 +18,21 @@
 export CONNECTION_TYPE="local"
 
 # Database settings
-export DB_NAME="BLUDB"
-export DB_SCHEMA="DB2INST1"
+export DB_NAME="<your-database>"
+export DB_SCHEMA="<your-schema>"
 
 # ============================================================================
 # JDBC SETTINGS (only needed if CONNECTION_TYPE="jdbc")
 # ============================================================================
 
 # JDBC connection URL
-# Format: jdbc:db2://hostname:port/database
-export JDBC_URL="jdbc:db2://your-db2-host.example.com:50000/BLUDB"
+# Format (standard): jdbc:db2://hostname:port/database
+# Format (SSL/Cloud): jdbc:db2://hostname:port/database:sslConnection=true;
+export JDBC_URL="jdbc:db2://<hostname>:<port>/<database>:sslConnection=true;"
 
 # JDBC credentials
-export JDBC_USER="your-jdbc-user"
-export JDBC_PASSWORD="your-jdbc-password"
+export JDBC_USER="<your-jdbc-user>"
+export JDBC_PASSWORD="<your-jdbc-password>"
 
 # JDBC driver (usually no need to change)
 export JDBC_DRIVER="com.ibm.db2.jcc.DB2Driver"
@@ -45,31 +46,22 @@ export CLASSPATH="${DB2_JDBC_JAR}:${CLASSPATH}"
 # ============================================================================
 
 # COS bucket name
-export COS_BUCKET="my-audit-bucket"
+export COS_BUCKET="<your-bucket>"
 
 # COS endpoint URL
 # Find your endpoint at: https://cloud.ibm.com/docs/cloud-object-storage?topic=cloud-object-storage-endpoints
-export COS_ENDPOINT="https://s3.us-south.cloud-object-storage.appdomain.cloud"
+export COS_ENDPOINT="<your-cos-endpoint>"
 
 # COS credentials (HMAC)
 # Get from IBM Cloud Console > Object Storage > Service Credentials
-export COS_ACCESS_KEY="your-access-key-id"
-export COS_SECRET_KEY="your-secret-access-key"
+export COS_ACCESS_KEY="<your-access-key-id>"
+export COS_SECRET_KEY="<your-secret-access-key>"
 
 # COS region (optional)
-export COS_REGION="us-south"
+export COS_REGION="<your-region>"
 
 # S3 prefix/folder path (optional)
 export S3_PREFIX=""
-
-# ============================================================================
-# TIME RANGE SETTINGS
-# ============================================================================
-
-# Time range for filtering audit files
-# Format: YYYY-MM-DD HH:MM:SS
-export START_TIME="2024-01-01 00:00:00"
-export END_TIME="2024-01-31 23:59:59"
 
 # ============================================================================
 # LOAD SETTINGS
@@ -95,15 +87,15 @@ export LOCAL_DIR="del_files"
 #   --jdbc-url "$JDBC_URL" \
 #   --jdbc-user "$JDBC_USER" \
 #   --jdbc-password "$JDBC_PASSWORD" \
+#   --jdbc-jar "$DB2_JDBC_JAR" \
 #   --bucket $COS_BUCKET \
 #   --cos-endpoint $COS_ENDPOINT \
 #   --cos-access-key $COS_ACCESS_KEY \
 #   --cos-secret-key $COS_SECRET_KEY \
-#   --start-time "$START_TIME" \
-#   --end-time "$END_TIME" \
-#   --load-type $LOAD_TYPE
+#   --load-type $LOAD_TYPE \
+#   --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 
-# Validation only
+# Validation of database records by time range
 # python validate_audit_data.py \
 #   --connection $CONNECTION_TYPE \
 #   --database $DB_NAME \
@@ -111,8 +103,9 @@ export LOCAL_DIR="del_files"
 #   --jdbc-url "$JDBC_URL" \
 #   --jdbc-user "$JDBC_USER" \
 #   --jdbc-password "$JDBC_PASSWORD" \
-#   --start-time "$START_TIME" \
-#   --end-time "$END_TIME" \
+#   --jdbc-jar "$DB2_JDBC_JAR" \
+#   --start-time "<YYYY-MM-DD HH:MM:SS>" \
+#   --end-time "<YYYY-MM-DD HH:MM:SS>" \
 #   --detailed \
 #   --export-csv validation_results.csv
 

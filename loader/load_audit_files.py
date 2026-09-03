@@ -6,23 +6,38 @@
 """
 Main script to download and load DB2 audit files from S3 into DB2 tables.
 
-This script:
-1. Downloads DEL files from IBM Cloud Object Storage (COS) within a time range
-2. Ensures audit tables exist in DB2 (creates them if needed)
-3. Loads the DEL files into the appropriate audit tables
-4. Validates that records exist in the specified time range
+Two distinct load paths are supported:
+
+  LOCAL — Run on the Db2 server machine as db2inst1 (or equivalent).
+          DEL files are downloaded from COS to a local directory, then loaded
+          with a standard LOAD command that reads from local disk.
+
+  JDBC + DB2REMOTE — Run anywhere with network access to the Db2 host.
+          When --cos-alias is supplied, DEL files are NOT downloaded locally.
+          The script builds a LOAD command with DB2REMOTE://<alias>//<filename>
+          so that the Db2 engine pulls each file from COS itself. No SCP or file
+          transfer to the loader machine is required.
 
 Usage:
-    # Local DB2 connection (runs DB2 commands as db2inst1 via sudo su)
-    python load_audit_files.py --connection local --start-time "2024-01-01 00:00:00" --end-time "2024-01-31 23:59:59"
-    
-    # JDBC connection
-    python load_audit_files.py --connection jdbc --jdbc-url "jdbc:db2://host:50000/BLUDB" --jdbc-user testuser --jdbc-password testpass --start-time "2024-01-01 00:00:00" --end-time "2024-01-31 23:59:59"
+    # Local Db2 server (files downloaded to disk, then loaded)
+    python load_audit_files.py --connection local \
+        --bucket <your-bucket> \
+        --cos-endpoint <your-cos-endpoint> \
+        --cos-access-key $COS_ACCESS_KEY --cos-secret-key $COS_SECRET_KEY \
+        --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
+
+    # JDBC + DB2REMOTE (no local file transfer — Db2 fetches from COS directly)
+    python load_audit_files.py --connection jdbc \
+        --jdbc-url "jdbc:db2://<hostname>:<port>/<database>:sslConnection=true;" \
+        --jdbc-user <jdbc-user> --jdbc-password <jdbc-password> \
+        --cos-alias <your-cos-alias> \
+        --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 """
 
 import argparse
 import sys
 import os
+import re
 from datetime import datetime
 
 # Add parent directory to path to import converter classes
@@ -40,28 +55,21 @@ def parse_args():
         description="Download and load DB2 audit files from S3 into DB2 tables",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-    Examples:
-      # Local DB2 connection
-      python load_audit_files.py --connection local \\
-        --bucket my-audit-bucket \\
-        --start-time "2024-01-01 00:00:00" \\
-        --end-time "2024-01-31 23:59:59"
-      
-      # Local DB2 connection using COS Alias
-      python load_audit_files.py --connection local \\
-        --cos-alias MY_COS_ALIAS \\
-        --start-time "2024-01-01 00:00:00" \\
-        --end-time "2024-01-31 23:59:59"
-      
-      # JDBC connection
-      python load_audit_files.py --connection jdbc \\
-        --jdbc-url "jdbc:db2://your-db2-host.example.com:50000/BLUDB" \\
-        --jdbc-user testuser \\
-        --jdbc-password testpass \\
-        --bucket my-audit-bucket \\
-        --start-time "2024-01-01 00:00:00" \\
-        --end-time "2024-01-31 23:59:59"
-            """
+Examples:
+  # Local Db2 server — download DELs from COS, then load from local disk
+  python load_audit_files.py --connection local \\
+    --bucket <your-bucket> \\
+    --cos-endpoint <your-cos-endpoint> \\
+    --cos-access-key $COS_ACCESS_KEY --cos-secret-key $COS_SECRET_KEY \\
+    --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
+
+  # JDBC + DB2REMOTE — no file transfer; Db2 engine fetches DELs from COS directly
+  python load_audit_files.py --connection jdbc \\
+    --jdbc-url "jdbc:db2://<hostname>:<port>/<database>:sslConnection=true;" \\
+    --jdbc-user <jdbc-user> --jdbc-password <jdbc-password> \\
+    --cos-alias <your-cos-alias> \\
+    --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
+        """
     )
     
     # Connection options
@@ -71,35 +79,45 @@ def parse_args():
         default='local',
         help='Connection type: local (db2inst1) or jdbc'
     )
-    parser.add_argument('--database', default='BLUDB', help='Database name (default: BLUDB)')
-    parser.add_argument('--schema', default='DB2INST1', help='Schema for tables (default: DB2INST1)')
+    parser.add_argument('--database', default='BLUDB', help='Database name')
+    parser.add_argument('--schema', default='DB2INST1', help='Schema for tables')
     
     # JDBC options
-    parser.add_argument('--jdbc-url', help='JDBC connection URL (required for jdbc connection)')
+    parser.add_argument(
+        '--jdbc-url',
+        help='JDBC connection URL (e.g. jdbc:db2://<hostname>:<port>/<database>:sslConnection=true;) (required for jdbc connection)'
+    )
     parser.add_argument('--jdbc-user', help='JDBC username (required for jdbc connection)')
     parser.add_argument('--jdbc-password', help='JDBC password (required for jdbc connection)')
     parser.add_argument('--jdbc-driver', default='com.ibm.db2.jcc.DB2Driver', help='JDBC driver class')
+    parser.add_argument(
+        '--jdbc-jar',
+        help='Path to db2jcc4.jar. Adds the JAR to the JVM classpath automatically; '
+             'alternative to setting CLASSPATH before running the script.'
+    )
     
     # S3/COS options
-    parser.add_argument('--bucket', help='S3/COS bucket name')
-    parser.add_argument('--cos-alias', help='db2RemStgManager COS alias — downloads binary audit logs and extracts to DEL format (alternative to --bucket)')
-    parser.add_argument('--db2-user', default='db2inst1', help='OS user for db2audit / db2RemStgManager commands (default: db2inst1)')
+    parser.add_argument('--bucket', help='S3/COS bucket name (required if --cos-alias is not provided)')
     parser.add_argument('--s3-prefix', default='', help='S3 prefix/folder path')
     parser.add_argument('--cos-endpoint', help='IBM COS endpoint URL')
     parser.add_argument('--cos-access-key', help='IBM COS access key ID')
     parser.add_argument('--cos-secret-key', help='IBM COS secret access key')
     parser.add_argument('--cos-region', help='IBM COS region')
-    
-    # Time range
     parser.add_argument(
-        '--start-time',
-        required=True,
-        help='Start time for filtering files (format: YYYY-MM-DD HH:MM:SS)'
+        '--cos-alias',
+        help=(
+            'db2RemStgManager alias configured on the Db2 server (JDBC mode only). '
+            'When provided, DEL files are NOT downloaded locally — the Db2 engine '
+            'fetches them from COS using LOAD FROM DB2REMOTE://<alias>//<filename>.'
+        )
     )
+    
+    # Files to process
     parser.add_argument(
-        '--end-time',
+        '--files',
+        nargs='+',
         required=True,
-        help='End time for filtering files (format: YYYY-MM-DD HH:MM:SS)'
+        help='List of DEL files to process (space-separated)'
     )
     
     # Load options
@@ -120,11 +138,6 @@ def parse_args():
         help='Directory for extracted DEL files when using --cos-alias (default: <local-dir>/del_extracted)'
     )
     parser.add_argument(
-        '--skip-download',
-        action='store_true',
-        help='Skip download step, use existing files in local-dir'
-    )
-    parser.add_argument(
         '--skip-table-check',
         action='store_true',
         help='Skip table existence check and creation'
@@ -132,7 +145,7 @@ def parse_args():
     parser.add_argument(
         '--validate-only',
         action='store_true',
-        help='Only validate time range, do not download or load'
+        help='Only report record counts per audit table, do not download or load'
     )
     
     return parser.parse_args()
@@ -144,45 +157,77 @@ def validate_args(args):
         if not all([args.jdbc_url, args.jdbc_user, args.jdbc_password]):
             print("❌ Error: --jdbc-url, --jdbc-user, and --jdbc-password are required for JDBC connection")
             sys.exit(1)
-    
-    # Validate download parameters if not skipped and not in validate-only mode
-    if not args.skip_download and not args.validate_only:
-        if not args.bucket and not args.cos_alias:
-            print("❌ Error: Either --bucket or --cos-alias must be specified for download")
+            
+    # COS credentials and bucket are only needed if we don't use cos_alias
+    if not args.cos_alias:
+        if not args.bucket:
+            print("❌ Error: --bucket is required when --cos-alias is not provided")
             sys.exit(1)
-        if args.bucket and args.cos_alias:
-            print("❌ Error: Cannot specify both --bucket and --cos-alias. Choose one.")
+        if not args.cos_endpoint:
+            print("❌ Error: --cos-endpoint is required when --cos-alias is not provided")
             sys.exit(1)
-        if args.bucket:
-            if not all([args.cos_endpoint, args.cos_access_key, args.cos_secret_key]):
-                print("❌ Error: --cos-endpoint, --cos-access-key, and --cos-secret-key are required when using --bucket")
-                sys.exit(1)
+        if not all([args.cos_access_key, args.cos_secret_key]):
+            print("❌ Error: --cos-access-key and --cos-secret-key are required when --cos-alias is not provided")
+            sys.exit(1)
+
+
+def parse_file_info(filename):
+    """
+    Extract category and timestamp from a filename.
+    Pattern: db2audit.db.BLUDB.log.<n>.<timestamp>.<CATEGORY>.del
+    """
+    basename = filename.replace("\\", "/").split("/")[-1]
+    parts = basename.rsplit('.', 2)
+    category = parts[-2].upper() if len(parts) >= 3 else os.path.splitext(basename)[0].upper()
     
-    # Validate time format
-    try:
-        datetime.strptime(args.start_time, "%Y-%m-%d %H:%M:%S")
-        datetime.strptime(args.end_time, "%Y-%m-%d %H:%M:%S")
-    except ValueError as e:
-        print(f"❌ Error: Invalid time format. Use 'YYYY-MM-DD HH:MM:SS'. {e}")
-        sys.exit(1)
+    # Extract timestamp (20 digits) — sequence number can be any digit, not just 0
+    match = re.search(r"\.\d+\.(\d{20})", basename)
+    timestamp = None
+    if match:
+        ts_str = match.group(1)
+        try:
+            timestamp = datetime.strptime(ts_str, "%Y%m%d%H%M%S%f")
+        except ValueError:
+            pass
+            
+    return category, timestamp
 
 
 def main():
     """Main execution function."""
     args = parse_args()
     validate_args(args)
-    
+
+    # Normalize --files: users may pass a single comma-separated string instead of
+    # space-separated tokens (e.g. when quoting the whole list in a shell script).
+    # Split and strip so every entry is a single filename regardless of how it was passed.
+    normalized = []
+    for entry in args.files:
+        for part in entry.split(","):
+            part = part.strip()
+            if part:
+                normalized.append(part)
+    args.files = normalized
+
     print("="*70)
     print("🚀 DB2 AUDIT FILE LOADER")
     print("="*70)
     print(f"Connection Type: {args.connection}")
-    print(f"Database: {args.database}")
-    print(f"Schema: {args.schema}")
-    print(f"Time Range: {args.start_time} to {args.end_time}")
+    print(f"Database:        {args.database}")
+    print(f"Schema:          {args.schema}")
+    print(f"Files to load:   {len(args.files)}")
+    if args.cos_alias:
+        print(f"Load mode:       DB2REMOTE (Db2 fetches DELs from COS — no local download)")
+        print(f"COS alias:       {args.cos_alias}")
+    elif args.connection == 'local':
+        print(f"Load mode:       Local (DELs downloaded to {args.local_dir}, loaded from disk)")
+    else:
+        print(f"Load mode:       JDBC (DELs downloaded to {args.local_dir}, loaded from disk)")
     print("="*70)
     print()
     
     # Initialize DB2 loader
+    loader = None
     try:
         loader = Db2AuditLoader(
             connection_type=args.connection,
@@ -193,147 +238,165 @@ def main():
             jdbc_user=args.jdbc_user,
             jdbc_password=args.jdbc_password,
             jdbc_driver=args.jdbc_driver,
-            db2_user=args.db2_user
+            jdbc_jar=args.jdbc_jar
         )
         loader.connect()
     except Exception as e:
         print(f"❌ Failed to initialize DB2 connection: {e}")
         sys.exit(1)
-    
+        
     try:
         # Validate only mode
         if args.validate_only:
-            print("\n📊 VALIDATION MODE - Checking records in time range")
+            print(f"\n📊 VALIDATION MODE - Record counts per audit table")
             print("-"*70)
-            
-            table_manager = Db2TableManager(loader)
+            print(f"{'TABLE':<20} {'RECORD COUNT':>15}")
+            print("-"*70)
             for category in Db2AuditLoader.AUDIT_CATEGORIES:
                 if loader.table_exists(category):
-                    result = loader.validate_time_range(
-                        category,
-                        args.start_time,
-                        args.end_time
-                    )
-                    if result['has_records']:
-                        print(f"✅ {category}: {result['record_count']} records")
-                    else:
-                        print(f"⚠️  {category}: No records found")
+                    count = loader.get_record_count(category)
+                    status = "✅" if count > 0 else "⚠️ "
+                    print(f"{status} {category:<18} {count:>15,}")
                 else:
-                    print(f"⚠️  {category}: Table does not exist")
-            
+                    print(f"⚠️  {category:<18} {'table does not exist':>15}")
             print("-"*70)
             loader.disconnect()
             return
-        
-        # Step 1: Download files from S3 (unless skipped)
-        downloaded_files = []
-        if not args.skip_download:
-            print("\n📥 STEP 1: Downloading files from S3/COS")
-            print("-"*70)
             
-            try:
-                if args.cos_alias:
-                    # COS alias path — handles both binary logs (download + db2audit extract)
-                    # and pre-extracted DEL files (download directly), based on what's in COS.
-                    extractor = Db2AuditBinaryExtractor(
-                        cos_alias=args.cos_alias,
-                        download_dir=args.local_dir,
-                        extract_dir=args.extract_dir,
-                        log_file="s3_download.log",
-                        db2_user=args.db2_user
-                    )
-                    result = extractor.download_and_extract_in_range(
-                        start_time=args.start_time,
-                        end_time=args.end_time
-                    )
-                    downloaded_files = result.get('del_files', [])
-                    # Load from the extract directory where DEL files were written
-                    args.local_dir = result.get('del_dir', args.local_dir)
-                else:
-                    downloader = Db2AuditS3Downloader(
-                        bucket_name=args.bucket,
-                        s3_prefix=args.s3_prefix,
-                        local_dir=args.local_dir,
-                        log_file="s3_download.log",
-                        cos_access_key_id=args.cos_access_key,
-                        cos_endpoint=args.cos_endpoint,
-                        cos_secret_access_key=args.cos_secret_key,
-                        region=args.cos_region
-                    )
-                    result = downloader.download_files_in_range(
-                        start_time=args.start_time,
-                        end_time=args.end_time
-                    )
-                    downloaded_files = result.get('downloaded', [])
+        # ── Step 1: Obtain file list ───────────────────────────────────────────
+        use_db2remote = bool(args.cos_alias)
 
-                if not downloaded_files:
-                    target_source = f"COS alias {args.cos_alias}" if args.cos_alias else f"bucket {args.bucket}"
-                    print(f"⚠️  No files downloaded/extracted. Check time range and {target_source}.")
-                    loader.disconnect()
-                    return
+        downloaded_files = []   # used only in the local/download path
+        remote_filenames = []   # used only in the DB2REMOTE path
+
+        if use_db2remote:
+            # JDBC + DB2REMOTE: expect DEL files from COS via the LOAD command
+            print("\n🔎 STEP 1: Preparing list of DEL files for DB2REMOTE load from COS (no local download)")
+            print("-"*70)
+            for f in args.files:
+                filename = os.path.basename(f)
+                if args.s3_prefix:
+                    cos_key = args.s3_prefix.rstrip("/") + "/" + filename
+                else:
+                    cos_key = filename
+                remote_filenames.append(cos_key)
+            print(f"✅ Prepared {len(remote_filenames)} DEL files to load from COS via DB2REMOTE")
+            
+        else:
+            # Local / plain-JDBC path: ensure DEL files are present on local disk.
+            print("\n📥 STEP 1: Ensuring DEL files are present on local disk")
+            print("-"*70)
+            try:
+                downloader = Db2AuditS3Downloader(
+                    bucket_name=args.bucket,
+                    s3_prefix=args.s3_prefix,
+                    local_dir=args.local_dir,
+                    log_file="s3_download.log",
+                    cos_access_key_id=args.cos_access_key,
+                    cos_endpoint=args.cos_endpoint,
+                    cos_secret_access_key=args.cos_secret_key,
+                    region=args.cos_region
+                )
                 
+                for f in args.files:
+                    filename = os.path.basename(f)
+                    local_path = os.path.join(args.local_dir, filename)
+                    if os.path.exists(local_path):
+                        print(f"ℹ️  {filename} already exists locally in {args.local_dir} (skipping download)")
+                        downloaded_files.append(local_path)
+                    else:
+                        if args.s3_prefix:
+                            cos_key = args.s3_prefix.rstrip("/") + "/" + filename
+                        else:
+                            cos_key = filename
+                            
+                        print(f"📥 Downloading {cos_key} from COS...")
+                        path = downloader.download_file(cos_key)
+                        if path:
+                            downloaded_files.append(path)
+                        else:
+                            print(f"❌ Error: Failed to download {cos_key} from COS")
+                            loader.disconnect()
+                            sys.exit(1)
+                print(f"✅ Prepared {len(downloaded_files)} DEL files on local disk")
             except Exception as e:
-                print(f"❌ Download failed: {e}")
+                print(f"❌ Ensuring local files failed: {e}")
                 loader.disconnect()
                 sys.exit(1)
-        else:
-            print(f"\n⏭️  STEP 1: Skipped (using existing files in {args.local_dir})")
-        
-        # Step 2: Ensure tables exist (unless skipped)
+
+        # ── Step 2: Ensure tables exist ──────────────────────────────────────────
         if not args.skip_table_check:
             print("\n📋 STEP 2: Checking audit tables")
             print("-"*70)
-            
             table_manager = Db2TableManager(loader)
             results = table_manager.ensure_all_tables_exist(args.schema)
-            
             failed_tables = [t for t, success in results.items() if not success]
             if failed_tables:
                 print(f"⚠️  Warning: Some tables could not be created: {', '.join(failed_tables)}")
         else:
             print("\n⏭️  STEP 2: Skipped (assuming tables exist)")
-        
-        # Step 3: Load files into DB2
-        print("\n📤 STEP 3: Loading files into DB2")
+
+        # ── Step 3: Load files into Db2 ──────────────────────────────────────────
+        print("\n📤 STEP 3: Loading files into Db2")
         print("-"*70)
+
+        load_results = {"total": 0, "success": 0, "failed": 0, "details": []}
+        files_to_load = remote_filenames if use_db2remote else downloaded_files
         
-        load_results = loader.load_directory(
-            directory=args.local_dir,
-            load_type=args.load_type
-        )
-        
+        for fpath in files_to_load:
+            category, _ = parse_file_info(fpath)
+            if category not in Db2AuditLoader.AUDIT_CATEGORIES:
+                loader.log(f"⚠️ Skipping {fpath}: unknown category '{category}'")
+                continue
+                
+            load_results["total"] += 1
+            result = loader.load_del_file(
+                del_file_path=fpath,
+                category=category,
+                load_type=args.load_type,
+                cos_alias=args.cos_alias if use_db2remote else None
+            )
+            load_results["details"].append(result)
+            if result["success"]:
+                load_results["success"] += 1
+            else:
+                load_results["failed"] += 1
+
         if load_results['failed'] > 0:
             print(f"\n⚠️  Warning: {load_results['failed']} files failed to load")
-        
-        # Step 4: Validate time range
-        print("\n✅ STEP 4: Validating loaded data")
+
+        # ── Step 4: Validate loaded data ──────────────────────────────────────────
+        print(f"\n✅ STEP 4: Record counts per audit table")
         print("-"*70)
-        
-        validation_results = []
+        print(f"{'TABLE':<20} {'RECORD COUNT':>15}")
+        print("-"*70)
+        step4_total = 0
         for category in Db2AuditLoader.AUDIT_CATEGORIES:
             if loader.table_exists(category):
-                result = loader.validate_time_range(
-                    category,
-                    args.start_time,
-                    args.end_time
-                )
-                validation_results.append(result)
-        
-        # Summary
+                count = loader.get_record_count(category)
+                status = "✅" if count > 0 else "⚠️ "
+                print(f"{status} {category:<18} {count:>15,}")
+                step4_total += count
+            else:
+                print(f"⚠️  {category:<18} {'table does not exist':>15}")
+        print("-"*70)
+        print(f"{'TOTAL':<20} {step4_total:>15,}")
+
+        # ── Summary ──────────────────────────────────────────────────────────────
         print("\n" + "="*70)
         print("📊 FINAL SUMMARY")
         print("="*70)
-        print(f"Files downloaded: {len(downloaded_files) if not args.skip_download else 'N/A (skipped)'}")
-        print(f"Files loaded: {load_results['success']}/{load_results['total']}")
-        print(f"Failed loads: {load_results['failed']}")
-        print()
-        print("Records in time range:")
-        for result in validation_results:
-            table_name = result['table'].split('.')[-1]
-            if result['has_records']:
-                print(f"  ✅ {table_name}: {result['record_count']} records")
-            else:
-                print(f"  ⚠️  {table_name}: No records")
+        print(f"Connection Type: {args.connection}")
+        if use_db2remote:
+            print(f"Load Mode:       DB2REMOTE (COS -> Db2)")
+            print(f"COS Alias:       {args.cos_alias}")
+        else:
+            print(f"Load Mode:       Local Disk ({args.local_dir} -> Db2)")
+
+        print(f"Total Files:     {load_results['total']}")
+        print(f"Loaded:          {load_results['success']}")
+        print(f"Failed:          {load_results['failed']}")
+        print(f"Total Records:   {step4_total:,}")
         print("="*70)
         
     except Exception as e:
@@ -341,9 +404,10 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
-    
+        
     finally:
-        loader.disconnect()
+        if loader is not None:
+            loader.disconnect()
         print("\n✅ Process completed")
 
 

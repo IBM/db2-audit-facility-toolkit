@@ -90,6 +90,56 @@ class Db2AuditS3Downloader:
             self.log(f"❌ Unexpected error downloading {key}: {e}")
         return None
 
+    def list_files_in_range(self, start_time=None, end_time=None):
+        """
+        Return the COS object keys within the time range without downloading them.
+        Used by the JDBC+DB2REMOTE load path where the Db2 engine fetches files
+        directly from COS.
+
+        Each returned value is the full COS key (including any folder prefix), so
+        the caller can reconstruct the DB2REMOTE://<alias>//<folder>//<filename>
+        URI correctly when an s3_prefix is configured.
+
+        Returns:
+            List of COS keys (relative to the bucket root).
+        """
+        if not start_time and not end_time:
+            self.log("⚠️ No time range provided — returning empty list.")
+            return []
+
+        if isinstance(start_time, str):
+            start_time = datetime.fromisoformat(start_time)
+        if isinstance(end_time, str):
+            end_time = datetime.fromisoformat(end_time)
+
+        if start_time and end_time and start_time > end_time:
+            self.log(f"❌ ERROR: Invalid time range - start_time ({start_time}) is after end_time ({end_time})")
+            return []
+
+        filenames = []
+        try:
+            for obj in self.bucket.objects.filter(Prefix=self.s3_prefix):
+                key = obj.key
+                if not re.search(r"\d{20}.*.del$", key):
+                    continue
+                ts = self.parse_timestamp_from_filename(key)
+                if not ts:
+                    continue
+                in_range = (
+                    (start_time and end_time and start_time <= ts <= end_time) or
+                    (start_time and not end_time and ts >= start_time) or
+                    (end_time and not start_time and ts <= end_time)
+                )
+                if in_range:
+                    # Return the full key so folder path is preserved for DB2REMOTE URIs.
+                    filenames.append(key)
+
+            self.log(f"✅ Listed {len(filenames)} DEL files in range (no download)")
+        except Exception as e:
+            self.log(f"❌ Error listing COS objects: {e}")
+
+        return filenames
+
     def download_files_in_range(self, start_time=None, end_time=None):
         """
         Stream through COS objects and download only those within the time range.
