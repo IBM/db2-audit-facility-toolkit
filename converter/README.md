@@ -28,7 +28,7 @@ pip install -r requirements.txt
 ### Required Files
 
 1. **DDL File**: DB2 audit table definitions (e.g., `db2audit.ddl`)
-   - Usually located at `/opt/ibm/db2/V11.5.0.0/misc/db2audit.ddl` on DB2 systems
+   - Usually located at `/opt/ibm/db2/<version>/misc/db2audit.ddl` on DB2 systems
 
 2. **IBM COS Credentials** (for `--download` or `--extract`):
    - For `--download`: bucket name, access key, secret key, endpoint URL
@@ -50,9 +50,9 @@ Download binary audit logs from COS via `db2RemStgManager`, extract to DEL, and 
 
 ```bash
 python db2audit_converter.py --extract --convert \
-  --cos-alias MY_COS_ALIAS \
-  --binary-files db2audit.db.BLUDB.log.0.20250112103400000000 \
-                 db2audit.db.BLUDB.log.0.20250112194000000000 \
+  --cos-alias <your-cos-alias> \
+  --binary-files db2audit.db.BLUDB.log.0.<timestamp1> \
+                 db2audit.db.BLUDB.log.0.<timestamp2> \
   --ddl-file db2audit.ddl \
   --output-dir ./csv_output
 ```
@@ -61,8 +61,8 @@ Extract only (skip CSV conversion):
 
 ```bash
 python db2audit_converter.py --extract \
-  --cos-alias MY_COS_ALIAS \
-  --binary-files db2audit.db.BLUDB.log.0.20250112103400000000
+  --cos-alias <your-cos-alias> \
+  --binary-files db2audit.db.BLUDB.log.0.<timestamp>
 ```
 
 #### 3. Download DEL Files from COS and Convert
@@ -71,13 +71,13 @@ Download audit DEL files from an S3-compatible COS endpoint and convert to CSV:
 
 ```bash
 python db2audit_converter.py --download --convert \
-  --bucket my-audit-bucket \
-  --access-key YOUR_ACCESS_KEY \
-  --secret-key YOUR_SECRET_KEY \
-  --endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
-  --region us-south \
-  --start-time "2025-11-12T10:34:00" \
-  --end-time "2025-11-12T19:40:00" \
+  --bucket <your-bucket> \
+  --access-key $COS_ACCESS_KEY \
+  --secret-key $COS_SECRET_KEY \
+  --endpoint <your-cos-endpoint> \
+  --region <your-region> \
+  --start-time "<YYYY-MM-DDTHH:MM:SS>" \
+  --end-time "<YYYY-MM-DDTHH:MM:SS>" \
   --output-dir ./csv_output
 ```
 
@@ -98,13 +98,13 @@ Download DEL files without converting:
 
 ```bash
 python db2audit_converter.py --download \
-  --bucket my-audit-bucket \
-  --access-key YOUR_ACCESS_KEY \
-  --secret-key YOUR_SECRET_KEY \
-  --endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
-  --region us-south \
-  --start-time "2025-11-12T10:34:00" \
-  --end-time "2025-11-12T19:40:00" \
+  --bucket <your-bucket> \
+  --access-key $COS_ACCESS_KEY \
+  --secret-key $COS_SECRET_KEY \
+  --endpoint <your-cos-endpoint> \
+  --region <your-region> \
+  --start-time "<YYYY-MM-DDTHH:MM:SS>" \
+  --end-time "<YYYY-MM-DDTHH:MM:SS>" \
   --del-dir ./my_downloads
 ```
 
@@ -244,14 +244,14 @@ You can also use the classes directly in your Python code.
 from Db2AuditBinaryExtractor import Db2AuditBinaryExtractor
 
 extractor = Db2AuditBinaryExtractor(
-    cos_alias="MY_COS_ALIAS",
+    cos_alias="<your-cos-alias>",
     download_dir="del_files",
     log_file="binary_extract_log.txt"
 )
 
 result = extractor.download_and_extract([
-    "db2audit.db.BLUDB.log.0.20250112103400000000",
-    "db2audit.db.BLUDB.log.0.20250112194000000000"
+    "db2audit.db.BLUDB.log.0.<timestamp1>",
+    "db2audit.db.BLUDB.log.0.<timestamp2>"
 ])
 
 print(f"DEL files ready in: {result['del_dir']}")
@@ -264,17 +264,17 @@ print(f"Files: {result['del_files']}")
 from Db2AuditS3Downloader import Db2AuditS3Downloader
 
 downloader = Db2AuditS3Downloader(
-    bucket_name="my-bucket",
+    bucket_name="<your-bucket>",
     s3_prefix="db2audit.db.BLUDB.log",
-    cos_access_key_id="YOUR_KEY",
-    cos_endpoint="https://s3.us-south.cloud-object-storage.appdomain.cloud",
-    cos_secret_access_key="YOUR_SECRET",
-    region="us-south"
+    cos_access_key_id="<your-access-key>",
+    cos_endpoint="<your-cos-endpoint>",
+    cos_secret_access_key="<your-secret-key>",
+    region="<your-region>"
 )
 
 summary = downloader.download_files_in_range(
-    start_time="2025-11-12T10:34:00",
-    end_time="2025-11-12T19:40:00"
+    start_time="<YYYY-MM-DDTHH:MM:SS>",
+    end_time="<YYYY-MM-DDTHH:MM:SS>"
 )
 
 print(f"Downloaded {len(summary['downloaded'])} files")
@@ -306,7 +306,7 @@ converter.process_all()
 
 **Solution:**
 - Confirm the script runs on the Db2 host as a user with `sudo su - db2inst1` rights
-- Verify the alias with: `sudo su - db2inst1 -c 'db2RemStgManager ALIAS LIST source=DB2REMOTE://<alias>//'`
+- Verify the alias with: `sudo su - db2inst1 -c 'db2RemStgManager ALIAS LIST source=DB2REMOTE://<your-cos-alias>//'`
 - Check `binary_extract_log.txt` for the exact command output
 
 ### No files downloaded (COS)
@@ -365,25 +365,25 @@ When DB2 audit logs are stored in a specific folder within the bucket:
 
 ```bash
 python db2audit_converter.py --download --convert \
-  --bucket db2wh-audit-demo \
-  --object audit-logs \
-  --access-key YOUR_KEY \
-  --secret-key YOUR_SECRET \
-  --endpoint https://s3.us-east.cloud-object-storage.appdomain.cloud \
-  --region us-east \
-  --start-time "2025-11-12T10:34:00" \
-  --end-time "2025-11-12T19:40:00"
+  --bucket <your-bucket> \
+  --object <your-folder> \
+  --access-key $COS_ACCESS_KEY \
+  --secret-key $COS_SECRET_KEY \
+  --endpoint <your-cos-endpoint> \
+  --region <your-region> \
+  --start-time "<YYYY-MM-DDTHH:MM:SS>" \
+  --end-time "<YYYY-MM-DDTHH:MM:SS>"
 ```
 
 This corresponds to the DB2 alias catalog entry:
 ```sql
 CALL SYSIBMADM.STORAGE_ACCESS_ALIAS.CATALOG(
-  'TESTAUDITALIAS2', 'S3',
-  's3.us-east.cloud-object-storage.appdomain.cloud',
-  '<YOUR_KEY>', '<YOUR_SECRET>',
-  'db2wh-audit-demo',  -- bucket
-  'audit-logs',        -- object (folder)
-  'G', 'BLUADMIN'
+  '<alias-name>', 'S3',
+  '<cos-endpoint-hostname>',
+  '<your-access-key>', '<your-secret-key>',
+  '<your-bucket>',  -- bucket
+  '<your-folder>',  -- object (folder)
+  'G', '<db2-admin-user>'
 )
 ```
 
@@ -391,7 +391,7 @@ CALL SYSIBMADM.STORAGE_ACCESS_ALIAS.CATALOG(
 
 ```bash
 python db2audit_converter.py --convert-only \
-  --ddl-file /opt/ibm/db2/V12.1.3.0/misc/db2audit.ddl \
+  --ddl-file /opt/ibm/db2/<version>/misc/db2audit.ddl \
   --del-dir ./del_files
 ```
 
@@ -401,15 +401,15 @@ Process multiple time ranges:
 
 ```bash
 #!/bin/bash
-for date in 2025-11-{10..15}; do
+for date in YYYY-MM-{DD..DD}; do
   python db2audit_converter.py --download --convert \
     --start-time "${date}T00:00:00" \
     --end-time "${date}T23:59:59" \
     --output-dir "csv_output_${date}" \
-    --bucket my-audit-bucket \
+    --bucket <your-bucket> \
     --access-key "$COS_ACCESS_KEY" \
     --secret-key "$COS_SECRET_KEY" \
-    --endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud
+    --endpoint <your-cos-endpoint>
 done
 ```
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 import os
-import re
+import subprocess
 from typing import Optional, Dict, Any
 
 
@@ -15,7 +15,7 @@ class Db2TableManager:
     
     # Audit table categories
     AUDIT_CATEGORIES = [
-        "AUDIT", "CHECKING", "CONTEXT", "EXECUTE", 
+        "AUDIT", "CHECKING", "CONTEXT", "EXECUTE",
         "OBJMAINT", "SECMAINT", "SYSADMIN", "VALIDATE"
     ]
     
@@ -29,11 +29,9 @@ class Db2TableManager:
         """
         self.loader = loader
         self.ddl_file = ddl_file or self._find_ddl_file()
-        self.table_ddls = {}
         
         if self.ddl_file and os.path.exists(self.ddl_file):
-            self._parse_ddl_file()
-            self.loader.log(f"📄 Loaded DDL definitions from: {self.ddl_file}")
+            self.loader.log(f"📄 DDL file found: {self.ddl_file}")
         else:
             self.loader.log("⚠️ DDL file not found, table creation will not be available")
     
@@ -51,28 +49,6 @@ class Db2TableManager:
                 return os.path.abspath(path)
         
         return None
-    
-    def _parse_ddl_file(self):
-        """Parse the DDL file and extract CREATE TABLE statements."""
-        with open(self.ddl_file, 'r') as f:
-            content = f.read()
-        
-        # Remove comments and ECHO statements
-        content = re.sub(r'--.*$', '', content, flags=re.MULTILINE)
-        content = re.sub(r'ECHO.*?;', '', content, flags=re.DOTALL)
-        
-        # Extract CREATE TABLE statements
-        pattern = r'CREATE\s+TABLE\s+(\w+)\s*\((.*?)\)\s*ORGANIZE\s+BY\s+ROW\s*;'
-        matches = re.finditer(pattern, content, re.DOTALL | re.IGNORECASE)
-        
-        for match in matches:
-            table_name = match.group(1).upper()
-            table_def = match.group(2).strip()
-            
-            if table_name in self.AUDIT_CATEGORIES:
-                self.table_ddls[table_name] = f"CREATE TABLE {table_name} ({table_def}) ORGANIZE BY ROW"
-        
-        self.loader.log(f"   Parsed {len(self.table_ddls)} table definitions")
     
     def ensure_table_exists(self, table_name: str, schema: str = None) -> bool:
         """
@@ -93,24 +69,30 @@ class Db2TableManager:
             self.loader.log(f"✅ Table {schema}.{table_name} already exists")
             return True
         
-        # Try to create the table
+        # Table missing — run the full DDL file to create all tables
         self.loader.log(f"📝 Table {schema}.{table_name} does not exist, attempting to create...")
-        
-        if table_name not in self.table_ddls:
-            self.loader.log(f"❌ No DDL definition found for {table_name}")
+        return self._run_ddl_file()
+    
+    def _run_ddl_file(self) -> bool:
+        """Run the DDL file via 'db2 -tf' to create all audit tables."""
+        if not self.ddl_file or not os.path.exists(self.ddl_file):
+            self.loader.log("❌ DDL file not available, cannot create tables")
             return False
         
         try:
-            # Modify DDL to use the specified schema
-            ddl = self.table_ddls[table_name]
-            ddl = ddl.replace(f"CREATE TABLE {table_name}", f"CREATE TABLE {schema}.{table_name}")
-            
-            self.loader.execute_sql(ddl)
-            self.loader.log(f"✅ Successfully created table {schema}.{table_name}")
+            result = subprocess.run(
+                ["db2", "-tf", self.ddl_file],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode != 0:
+                self.loader.log(f"❌ DDL execution failed: {result.stderr.strip()}")
+                return False
+            self.loader.log(f"✅ DDL executed successfully from: {self.ddl_file}")
             return True
-        
         except Exception as e:
-            self.loader.log(f"❌ Failed to create table {schema}.{table_name}: {e}")
+            self.loader.log(f"❌ Failed to run DDL file: {e}")
             return False
     
     def ensure_all_tables_exist(self, schema: str = None) -> Dict[str, bool]:

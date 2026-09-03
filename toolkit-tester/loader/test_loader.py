@@ -83,9 +83,140 @@ class TestDb2AuditLoaderInitialization(unittest.TestCase):
         self.assertEqual(Db2AuditLoader.LOBS_CATEGORIES, expected_lobs)
 
 
+class TestDb2AuditLoaderCategoryExtraction(unittest.TestCase):
+    """Test category extraction from full audit DEL filenames."""
+
+    def test_full_audit_filename(self):
+        """Category is the second-to-last dot-segment in the full filename."""
+        filename = "db2audit.db.BLUDB.log.0.20260827221347524319.context.del"
+        parts = filename.rsplit('.', 2)
+        category = parts[-2].upper() if len(parts) >= 3 else ""
+        self.assertEqual(category, "CONTEXT")
+
+    def test_full_audit_filename_execute(self):
+        filename = "db2audit.db.BLUDB.log.0.20260827221347524319.execute.del"
+        parts = filename.rsplit('.', 2)
+        category = parts[-2].upper() if len(parts) >= 3 else ""
+        self.assertEqual(category, "EXECUTE")
+
+    def test_short_filename_fallback(self):
+        """Short names like 'audit.del' still resolve correctly."""
+        import os
+        filename = "audit.del"
+        parts = filename.rsplit('.', 2)
+        category = parts[-2].upper() if len(parts) >= 3 else os.path.splitext(filename)[0].upper()
+        self.assertEqual(category, "AUDIT")
+
+
+class TestDb2AuditLoaderDb2RemoteCommand(unittest.TestCase):
+    """Test that load_del_file builds the correct LOAD command for DB2REMOTE mode."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix='db2remote_test_')
+        self.log_file = os.path.join(self.test_dir, 'test.log')
+        self.loader = Db2AuditLoader(
+            connection_type='local',
+            database='BLUDB',
+            schema='DB2INST1',
+            log_file=self.log_file
+        )
+
+    def tearDown(self):
+        if os.path.exists(self.test_dir):
+            shutil.rmtree(self.test_dir)
+
+    def test_db2remote_raises_file_not_found_without_alias(self):
+        """Without cos_alias, local mode still checks for file existence."""
+        with self.assertRaises(FileNotFoundError):
+            self.loader.load_del_file(
+                '/nonexistent/db2audit.db.BLUDB.log.0.20260827221347524319.context.del',
+                'CONTEXT'
+            )
+
+    def _make_jdbc_loader(self):
+        """Return a bare Db2AuditLoader instance wired for JDBC with conn=None."""
+        jdbc_loader = Db2AuditLoader.__new__(Db2AuditLoader)
+        jdbc_loader.connection_type = 'jdbc'
+        jdbc_loader.schema = 'DB2INST1'
+        jdbc_loader.log_file = self.log_file
+        jdbc_loader.conn = None  # no real connection
+        jdbc_loader.AUDIT_CATEGORIES = Db2AuditLoader.AUDIT_CATEGORIES
+        jdbc_loader.LOBS_CATEGORIES = Db2AuditLoader.LOBS_CATEGORIES
+        return jdbc_loader
+
+    def test_db2remote_skips_file_check_with_alias(self):
+        """With cos_alias in jdbc mode, FileNotFoundError is NOT raised for missing local files."""
+        jdbc_loader = self._make_jdbc_loader()
+        try:
+            jdbc_loader.load_del_file(
+                'db2audit.db.BLUDB.log.0.20260827221347524319.context.del',
+                'CONTEXT',
+                cos_alias='AUDITTOTOK'
+            )
+        except (AttributeError, TypeError):
+            # Expected: conn is None, so _load_jdbc will fail — that's fine
+            pass
+        except FileNotFoundError:
+            self.fail("FileNotFoundError should not be raised when cos_alias is provided")
+
+    def test_db2remote_uri_no_folder(self):
+        """Bare filename produces DB2REMOTE://<alias>//<filename>."""
+        jdbc_loader = self._make_jdbc_loader()
+        logged = []
+        jdbc_loader.log = lambda msg: logged.append(msg)
+        try:
+            jdbc_loader.load_del_file(
+                'db2audit.db.BLUDB.log.0.20260827221347524319.context.del',
+                'CONTEXT',
+                cos_alias='AUDITTOTOK'
+            )
+        except Exception:
+            pass
+        uri_log = next((m for m in logged if 'DB2REMOTE' in m), '')
+        self.assertIn('DB2REMOTE://AUDITTOTOK//db2audit.db.BLUDB.log.0.20260827221347524319.context.del', uri_log)
+
+    def test_db2remote_uri_with_folder(self):
+        """COS key with folder produces DB2REMOTE://<alias>//<folder>//<filename>."""
+        jdbc_loader = self._make_jdbc_loader()
+        logged = []
+        jdbc_loader.log = lambda msg: logged.append(msg)
+        try:
+            jdbc_loader.load_del_file(
+                'del/2025/db2audit.db.BLUDB.log.0.20260827221347524319.context.del',
+                'CONTEXT',
+                cos_alias='AUDITTOTOK'
+            )
+        except Exception:
+            pass
+        uri_log = next((m for m in logged if 'DB2REMOTE' in m), '')
+        self.assertIn(
+            'DB2REMOTE://AUDITTOTOK//del//2025//db2audit.db.BLUDB.log.0.20260827221347524319.context.del',
+            uri_log
+        )
+
+    def test_db2remote_uri_with_deep_folder(self):
+        """Multiple nested folder segments are each separated by //."""
+        jdbc_loader = self._make_jdbc_loader()
+        logged = []
+        jdbc_loader.log = lambda msg: logged.append(msg)
+        try:
+            jdbc_loader.load_del_file(
+                'audit/year=2025/month=08/db2audit.db.BLUDB.log.0.20260827221347524319.execute.del',
+                'EXECUTE',
+                cos_alias='MYALIAS'
+            )
+        except Exception:
+            pass
+        uri_log = next((m for m in logged if 'DB2REMOTE' in m), '')
+        self.assertIn(
+            'DB2REMOTE://MYALIAS//audit//year=2025//month=08//db2audit.db.BLUDB.log.0.20260827221347524319.execute.del',
+            uri_log
+        )
+
+
 class TestDb2AuditLoaderFileOperations(unittest.TestCase):
     """Test cases for file operations"""
-    
+
     def setUp(self):
         """Set up test fixtures"""
         self.test_dir = tempfile.mkdtemp(prefix='loader_test_')
@@ -251,20 +382,19 @@ CREATE TABLE CHECKING (
         self.assertEqual(manager.loader, self.loader)
         self.assertEqual(manager.ddl_file, self.ddl_file)
     
-    def test_ddl_parsing(self):
-        """Test DDL file parsing"""
+    def test_ddl_file_found(self):
+        """Test that a valid DDL file path is stored"""
         manager = Db2TableManager(self.loader, self.ddl_file)
         
-        self.assertIn('AUDIT', manager.table_ddls)
-        self.assertIn('CHECKING', manager.table_ddls)
-        self.assertEqual(len(manager.table_ddls), 2)
+        self.assertTrue(os.path.exists(manager.ddl_file))
     
     def test_ddl_file_not_found(self):
         """Test handling of missing DDL file"""
         manager = Db2TableManager(self.loader, '/nonexistent/file.ddl')
         
-        # Should initialize but have no table definitions
-        self.assertEqual(len(manager.table_ddls), 0)
+        # Should initialize but ddl_file path points to a non-existent file
+        self.assertEqual(manager.ddl_file, '/nonexistent/file.ddl')
+        self.assertFalse(os.path.exists(manager.ddl_file))
     
     def test_audit_categories_match(self):
         """Test that table manager categories match loader categories"""
@@ -349,6 +479,8 @@ def run_tests():
     suite = unittest.TestSuite()
     
     suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditLoaderInitialization))
+    suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditLoaderCategoryExtraction))
+    suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditLoaderDb2RemoteCommand))
     suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditLoaderFileOperations))
     suite.addTests(loader.loadTestsFromTestCase(TestDb2AuditLoaderSecurity))
     suite.addTests(loader.loadTestsFromTestCase(TestDb2TableManager))

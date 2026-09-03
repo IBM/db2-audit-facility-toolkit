@@ -62,12 +62,11 @@ loader/
 ```bash
 python load_audit_files.py \
   --connection local \
-  --bucket my-audit-bucket \
-  --cos-endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
-  --cos-access-key YOUR_ACCESS_KEY \
-  --cos-secret-key YOUR_SECRET_KEY \
-  --start-time "2024-01-01 00:00:00" \
-  --end-time "2024-01-31 23:59:59"
+  --bucket <your-bucket> \
+  --cos-endpoint <your-cos-endpoint> \
+  --cos-access-key $COS_ACCESS_KEY \
+  --cos-secret-key $COS_SECRET_KEY \
+  --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 ```
 
 #### JDBC Connection (Remote)
@@ -75,38 +74,27 @@ python load_audit_files.py \
 ```bash
 python load_audit_files.py \
   --connection jdbc \
-  --jdbc-url "jdbc:db2://your-db2-host.example.com:50000/BLUDB" \
-  --jdbc-user testuser \
-  --jdbc-password testpass \
-  --bucket my-audit-bucket \
-  --cos-endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
-  --cos-access-key YOUR_ACCESS_KEY \
-  --cos-secret-key YOUR_SECRET_KEY \
-  --start-time "2024-01-01 00:00:00" \
-  --end-time "2024-01-31 23:59:59"
+  --jdbc-url "jdbc:db2://<hostname>:<port>/<database>:sslConnection=true;" \
+  --jdbc-user <jdbc-user> \
+  --jdbc-password <jdbc-password> \
+  --cos-alias <your-cos-alias> \
+  --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 ```
 
 ### 2. Validate Loaded Data
 
-Check if records exist within a time range:
+Report record counts for all audit tables to confirm a successful load:
 
 ```bash
 # Local connection
-python validate_audit_data.py \
-  --connection local \
-  --start-time "2024-01-01 00:00:00" \
-  --end-time "2024-01-31 23:59:59" \
-  --detailed
+python validate_audit_data.py --connection local
 
 # JDBC connection
 python validate_audit_data.py \
   --connection jdbc \
-  --jdbc-url "jdbc:db2://host:50000/BLUDB" \
-  --jdbc-user testuser \
-  --jdbc-password testpass \
-  --start-time "2024-01-01 00:00:00" \
-  --end-time "2024-01-31 23:59:59" \
-  --export-csv validation_results.csv
+  --jdbc-url "jdbc:db2://<hostname>:<port>/<database>:sslConnection=true;" \
+  --jdbc-user <jdbc-user> \
+  --jdbc-password <jdbc-password>
 ```
 
 ## Command-Line Options
@@ -121,16 +109,15 @@ python validate_audit_data.py \
 | `--jdbc-url` | JDBC connection URL (required for jdbc) | - |
 | `--jdbc-user` | JDBC username (required for jdbc) | - |
 | `--jdbc-password` | JDBC password (required for jdbc) | - |
-| `--bucket` | S3/COS bucket name (required) | - |
+| `--bucket` | S3/COS bucket name (required if --cos-alias is not set) | - |
 | `--s3-prefix` | S3 prefix/folder path | `""` |
 | `--cos-endpoint` | IBM COS endpoint URL | - |
 | `--cos-access-key` | IBM COS access key ID | - |
 | `--cos-secret-key` | IBM COS secret access key | - |
-| `--start-time` | Start time (YYYY-MM-DD HH:MM:SS) (required) | - |
-| `--end-time` | End time (YYYY-MM-DD HH:MM:SS) (required) | - |
+| `--cos-alias` | Storage access alias (for direct DB2REMOTE load) | - |
+| `--files` | List of DEL files to process (space-separated, required) | - |
 | `--load-type` | Load type: `insert` or `replace` | `insert` |
 | `--local-dir` | Local directory for downloaded files | `del_files` |
-| `--skip-download` | Skip download, use existing files | `false` |
 | `--skip-table-check` | Skip table existence check | `false` |
 | `--validate-only` | Only validate, don't download/load | `false` |
 
@@ -144,11 +131,7 @@ python validate_audit_data.py \
 | `--jdbc-url` | JDBC connection URL (required for jdbc) | - |
 | `--jdbc-user` | JDBC username (required for jdbc) | - |
 | `--jdbc-password` | JDBC password (required for jdbc) | - |
-| `--start-time` | Start time (YYYY-MM-DD HH:MM:SS) (required) | - |
-| `--end-time` | End time (YYYY-MM-DD HH:MM:SS) (required) | - |
 | `--tables` | Specific tables to validate | All tables |
-| `--detailed` | Show detailed statistics | `false` |
-| `--export-csv` | Export results to CSV file | - |
 
 ## Workflow
 
@@ -157,13 +140,13 @@ The typical workflow is:
 1. **Download**: Files are downloaded from IBM COS based on timestamp in filename
 2. **Table Check**: Ensures all required audit tables exist (creates if needed)
 3. **Load**: Uses DB2 LOAD command to efficiently insert data
-4. **Validate**: Confirms records exist in the specified time range
+4. **Validate**: Reports row counts per audit table — a successful load is confirmed when counts are non-zero
 
 ## Table Schemas
 
 Tables are created using definitions from `../converter/db2audit.ddl`. The loader automatically:
-- Checks if tables exist in `DB2INST1` or `AUDIT` schema
-- Creates missing tables under `DB2INST1` schema
+- Checks if tables exist in the configured schema or `AUDIT` schema
+- Creates missing tables under the configured schema
 - Handles CLOB/BLOB columns for CONTEXT and EXECUTE tables
 
 ### Supported Audit Categories
@@ -214,35 +197,31 @@ All operations are logged to:
 # Download, load, and validate in one command
 python load_audit_files.py \
   --connection local \
-  --bucket prod-audit-bucket \
-  --cos-endpoint https://s3.us-south.cloud-object-storage.appdomain.cloud \
+  --bucket <your-bucket> \
+  --cos-endpoint <your-cos-endpoint> \
   --cos-access-key $COS_ACCESS_KEY \
   --cos-secret-key $COS_SECRET_KEY \
-  --start-time "2024-01-15 00:00:00" \
-  --end-time "2024-01-15 23:59:59"
+  --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 ```
 
 ### Example 2: Load Existing Files
 
 ```bash
-# Skip download, load files already in del_files/
+# Skip download if files already exist in local-dir, otherwise download and load
 python load_audit_files.py \
   --connection local \
-  --skip-download \
   --local-dir ./del_files \
-  --start-time "2024-01-15 00:00:00" \
-  --end-time "2024-01-15 23:59:59"
+  --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 ```
 
 ### Example 3: Validation Only
 
 ```bash
-# Check if data exists without loading
+# Check if data exists without loading (parses timestamps from file names)
 python load_audit_files.py \
   --connection local \
   --validate-only \
-  --start-time "2024-01-15 00:00:00" \
-  --end-time "2024-01-15 23:59:59"
+  --files db2audit.db.BLUDB.log.0.20260827221347524319.context.del
 ```
 
 ### Example 4: Detailed Validation with Export
@@ -251,8 +230,8 @@ python load_audit_files.py \
 # Get detailed statistics and export to CSV
 python validate_audit_data.py \
   --connection local \
-  --start-time "2024-01-15 00:00:00" \
-  --end-time "2024-01-15 23:59:59" \
+  --start-time "<YYYY-MM-DD HH:MM:SS>" \
+  --end-time "<YYYY-MM-DD HH:MM:SS>" \
   --detailed \
   --export-csv validation_report.csv
 ```
@@ -274,7 +253,7 @@ python validate_audit_data.py \
 
 1. **db2 command not found**: Ensure DB2 is installed and in PATH
    ```bash
-   export PATH=/opt/ibm/db2/V11.5/bin:$PATH
+   export PATH=/opt/ibm/db2/<version>/bin:$PATH
    ```
 
 2. **SQL1024N**: Database not started
